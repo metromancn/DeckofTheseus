@@ -25,316 +25,378 @@ extension Color {
     static let textGold = Color(hex: 0xD4A520)
 }
 
+// MARK: - Pixel Font
+
+extension Font {
+    static func pixel(_ size: CGFloat) -> Font {
+        .custom("VT323-Regular", size: size)
+    }
+}
+
+// MARK: - Crisp Pixel Image
+
+struct PixelImage: View {
+    let name: String
+    var width: CGFloat? = nil
+    var height: CGFloat? = nil
+
+    var body: some View {
+        Image(name)
+            .resizable()
+            .interpolation(.none)
+            .aspectRatio(contentMode: .fit)
+            .frame(width: width, height: height)
+    }
+}
+
+// MARK: - Health Hearts (Pixel Art)
+
+struct HealthHeartsView: View {
+    let currentHp: Int
+    let maxHp: Int
+    let heartSize: CGFloat
+
+    private func heartImage(at index: Int) -> String {
+        let hpPerHeart = Double(maxHp) / 5.0
+        let heartHp = Double(currentHp) - Double(index) * hpPerHeart
+        if heartHp >= hpPerHeart {
+            return "health_heart_full"
+        } else if heartHp > 0 {
+            return "health_heart_half"
+        } else {
+            return "health_heart_none"
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 2) {
+            HStack(spacing: 3) {
+                ForEach(0..<5, id: \.self) { index in
+                    Image(heartImage(at: index))
+                        .resizable()
+                        .interpolation(.none)
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: heartSize, height: heartSize)
+                }
+            }
+
+            Text("\(currentHp)/\(maxHp)")
+                .font(.pixel(heartSize * 0.65))
+                .foregroundColor(Color(hex: 0xD4A0A8))
+        }
+    }
+}
+
+// MARK: - Shield / Block
+
+struct ShieldView: View {
+    let block: Int
+    let size: CGFloat
+
+    var body: some View {
+        ZStack {
+            Image(systemName: "shield.fill")
+                .font(.system(size: size))
+                .foregroundColor(block > 0 ? Color(hex: 0x4499DD) : Color(hex: 0x1A2838))
+                .shadow(
+                    color: block > 0 ? Color(hex: 0x44AAEE).opacity(0.5) : .clear,
+                    radius: block > 0 ? 5 : 0
+                )
+
+            Text("\(block)")
+                .font(.pixel(size * 0.55))
+                .foregroundColor(block > 0 ? .white : Color(hex: 0x2A3848))
+        }
+    }
+}
+
+// MARK: - Face Down Card
+
+struct FaceDownCard: View {
+    let width: CGFloat
+    let height: CGFloat
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 4)
+            .fill(
+                LinearGradient(
+                    colors: [Color(hex: 0x2A1E3A), Color(hex: 0x1A1228)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color.goldBorder, lineWidth: 1.5)
+            )
+            .overlay(
+                VStack(spacing: 4) {
+                    Text("\u{2726}")
+                        .font(.system(size: min(width, height) * 0.2))
+                        .foregroundColor(Color.goldDark.opacity(0.5))
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.goldDark.opacity(0.15))
+                        .frame(width: width * 0.5, height: height * 0.03)
+                }
+            )
+            .frame(width: width, height: height)
+    }
+}
+
 // MARK: - Content View
 
 struct ContentView: View {
     @State private var engine = GameEngine()
     @State private var enemyPulsing = false
+    @State private var playerPulsing = false
+    @State private var tooltipCardId: UUID? = nil
+    @State private var dealtCardIds: Set<UUID> = []
+    @State private var revealedCardIds: Set<UUID> = []
 
     var body: some View {
         GeometryReader { geo in
-            VStack(spacing: 0) {
-                statusBar
-                    .frame(height: geo.size.height * 0.10)
+            let unit = min(geo.size.width, geo.size.height)
+            let cardH = min(unit * 0.30, 260.0)
+            let cardW = cardH * 0.72
+            let bossH = min(unit * 0.38, 320.0)
+            let playerH = bossH * 0.75
+            let heartSize = min(unit * 0.065, 42.0)
+            let titleFont = min(unit * 0.030, 20.0)
+            let bodyFont = min(unit * 0.026, 18.0)
+            let smallFont = min(unit * 0.022, 16.0)
+            let orbSize = max(unit * 0.09, 50.0)
+            let handWidth = geo.size.width * 0.52
 
-                goldDivider
-
-                arena
-                    .frame(maxHeight: .infinity)
-
-                goldDivider
-
-                controlDeck
-                    .frame(height: geo.size.height * 0.40)
-            }
-        }
-        .background(Color.bgDeep)
-        .ignoresSafeArea()
-    }
-
-    // MARK: - Status Bar
-
-    private var statusBar: some View {
-        HStack {
-            HStack(spacing: 16) {
-                hpBar
-                Text("\u{1F4B0} \(engine.player.gold)")
-                    .font(.system(size: 13, weight: .bold, design: .serif))
-                    .foregroundColor(.textGold)
-            }
-
-            Spacer()
-
-            Text("Act 1 \u{2014} Floor 4")
-                .font(.system(size: 11, weight: .bold, design: .serif))
-                .foregroundColor(.textMuted)
-                .tracking(1)
-
-            Spacer()
-
-            HStack(spacing: 6) {
-                ForEach(0..<3, id: \.self) { _ in
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(Color.bgPanelDark)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 3)
-                                .stroke(Color(hex: 0x3A2A5A).opacity(0.5), lineWidth: 1)
-                        )
-                        .frame(width: 24, height: 24)
-                }
-            }
-        }
-        .padding(.horizontal, 20)
-        .background(
-            LinearGradient(
-                colors: [Color.bgPanel, Color(hex: 0x120E20), Color.bgPanelDark],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        )
-    }
-
-    private var hpBar: some View {
-        HStack(spacing: 6) {
-            Text("\u{2665}")
-                .font(.system(size: 16))
-                .foregroundColor(Color(hex: 0xBF2040))
-                .shadow(color: Color(hex: 0xBF2040).opacity(0.5), radius: 4)
-
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(Color.bgDeep)
-
-                    let fraction = CGFloat(engine.player.currentHp) / CGFloat(engine.player.maxHp)
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(
-                            LinearGradient(
-                                colors: [.hpRuby, Color(hex: 0x9B1B30), .hpRubyDark],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                        .frame(width: geo.size.width * fraction)
-                }
-                .overlay(
-                    RoundedRectangle(cornerRadius: 2)
-                        .stroke(Color(hex: 0x4A2030), lineWidth: 1)
+            ZStack {
+                // Background
+                LinearGradient(
+                    colors: [Color(hex: 0x0A0816), Color(hex: 0x0C0A14), Color(hex: 0x14101E)],
+                    startPoint: .top,
+                    endPoint: .bottom
                 )
-            }
-            .frame(width: 100, height: 12)
 
-            Text("\(engine.player.currentHp)/\(engine.player.maxHp)")
-                .font(.system(size: 11, weight: .bold, design: .serif))
-                .foregroundColor(Color(hex: 0xD4A0A8))
-        }
-    }
+                // Top-left: Floor-Act + Turn
+                HStack(spacing: 12) {
+                    Text("1-4")
+                        .font(.pixel(titleFont * 1.2))
+                        .foregroundColor(.textParchment)
 
-    // MARK: - Arena
+                    Text("Turn \(engine.currentTurn)")
+                        .font(.pixel(titleFont))
+                        .foregroundColor(.textMuted)
 
-    private var arena: some View {
-        ZStack {
-            LinearGradient(
-                colors: [Color.bgDeep, Color(hex: 0x0C0A14), Color(hex: 0x14101E)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
+                    Spacer()
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-            HStack {
-                Spacer()
-
-                // Player
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(
-                        LinearGradient(
-                            colors: [Color(hex: 0x8A6A40), Color(hex: 0x5A3A20), Color(hex: 0x2A1808)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .frame(width: 65, height: 95)
-                    .shadow(color: Color(hex: 0xA07830).opacity(0.25), radius: 12)
-
-                Spacer()
-                Spacer()
-
-                // Enemy
-                VStack(spacing: 12) {
-                    Text("\u{2694}\u{FE0F} 12")
-                        .font(.system(size: 12, weight: .bold, design: .serif))
-                        .foregroundColor(Color(hex: 0xD4A0A8))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 5)
-                        .background(
-                            LinearGradient(
-                                colors: [Color(hex: 0x5A1923).opacity(0.7), Color(hex: 0x320F16).opacity(0.85)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 3))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 3)
-                                .stroke(Color(hex: 0xC85064).opacity(0.3), lineWidth: 1)
-                        )
-
-                    Circle()
-                        .fill(
-                            RadialGradient(
-                                colors: [
-                                    Color(hex: 0x40C068),
-                                    Color(hex: 0x228A42),
-                                    Color(hex: 0x186A32),
-                                    Color(hex: 0x0A3818)
-                                ],
-                                center: .center,
-                                startRadius: 0,
-                                endRadius: 55
-                            )
-                        )
-                        .frame(width: 100, height: 100)
-                        .shadow(color: Color(hex: 0x32B45A).opacity(0.3), radius: 16)
-                        .scaleEffect(enemyPulsing ? 1.04 : 1.0)
+                // Boss (CENTER, lowered)
+                VStack(spacing: 4) {
+                    PixelImage(name: "boss_slime", height: bossH)
+                        .shadow(color: Color(hex: 0x32B45A).opacity(0.4), radius: 20)
+                        .scaleEffect(enemyPulsing ? 1.03 : 1.0)
                         .animation(
                             .easeInOut(duration: 1.75).repeatForever(autoreverses: true),
                             value: enemyPulsing
                         )
-                        .onAppear { enemyPulsing = true }
-                }
 
-                Spacer()
-            }
-            .padding(.horizontal, 40)
-        }
-    }
-
-    // MARK: - Control Deck
-
-    private var controlDeck: some View {
-        HStack(alignment: .center, spacing: 12) {
-            // Energy + Draw Pile
-            VStack(spacing: 10) {
-                ZStack {
-                    Circle()
-                        .fill(
-                            RadialGradient(
-                                colors: [
-                                    Color(hex: 0xF0D860),
-                                    Color(hex: 0xD4A520),
-                                    Color(hex: 0xA87818),
-                                    Color(hex: 0x7A5510)
-                                ],
-                                center: UnitPoint(x: 0.38, y: 0.32),
-                                startRadius: 0,
-                                endRadius: 26
-                            )
-                        )
-                        .frame(width: 48, height: 48)
-                        .shadow(color: .goldAccent.opacity(0.35), radius: 8)
-
-                    Text("\(engine.player.currentEnergy)/\(engine.player.maxEnergy)")
-                        .font(.system(size: 13, weight: .heavy, design: .serif))
-                        .foregroundColor(Color(hex: 0x1A1008))
-                }
-
-                VStack(spacing: 2) {
-                    Text("Draw")
-                        .font(.system(size: 8, weight: .bold, design: .serif))
-                        .foregroundColor(.textMuted)
-                        .tracking(1)
-                    Text("\(engine.deck.drawPile.count)")
-                        .font(.system(size: 16, weight: .bold, design: .serif))
-                        .foregroundColor(Color(hex: 0xB0A080))
-                }
-            }
-            .frame(width: 56)
-
-            // Hand
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(engine.deck.hand) { card in
-                        CardView(card: card)
-                            .onTapGesture {
-                                if let index = engine.deck.hand.firstIndex(where: { $0.id == card.id }) {
-                                    withAnimation(.easeOut(duration: 0.15)) {
-                                        engine.playCard(at: index)
-                                    }
-                                }
-                            }
-                    }
-                }
-                .padding(.vertical, 8)
-            }
-
-            // End Turn + Discard
-            VStack(spacing: 10) {
-                Button {
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        engine.endTurn()
-                    }
-                } label: {
-                    Text("END TURN")
-                        .font(.system(size: 10, weight: .heavy, design: .serif))
-                        .tracking(1)
+                    Text("Slime King")
+                        .font(.pixel(titleFont))
                         .foregroundColor(.textParchment)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
-                        .background(
-                            LinearGradient(
-                                colors: [Color(hex: 0x6A2028), Color(hex: 0x4A1520), Color(hex: 0x2A0A10)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 3))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 3)
-                                .stroke(Color(hex: 0x6A3020), lineWidth: 1.5)
-                        )
-                        .shadow(color: Color(hex: 0x501414).opacity(0.5), radius: 6)
-                }
 
-                VStack(spacing: 2) {
-                    Text("Discard")
-                        .font(.system(size: 8, weight: .bold, design: .serif))
-                        .foregroundColor(.textMuted)
-                        .tracking(1)
-                    Text("\(engine.deck.discardPile.count)")
-                        .font(.system(size: 16, weight: .bold, design: .serif))
-                        .foregroundColor(Color(hex: 0xB0A080))
+                    HealthHeartsView(
+                        currentHp: engine.enemy.currentHp,
+                        maxHp: engine.enemy.maxHp,
+                        heartSize: heartSize
+                    )
+
+                    ShieldView(block: engine.enemy.currentBlock, size: heartSize * 0.8)
                 }
+                .position(x: geo.size.width * 0.50, y: geo.size.height * 0.42)
+
+                // Player (LEFT side, LOW — just above draw pile)
+                HStack(alignment: .center, spacing: max(heartSize * 0.3, 6)) {
+                    PixelImage(name: "player_sprite", height: playerH)
+                        .shadow(color: Color(hex: 0xA07830).opacity(0.3), radius: 12)
+                        .scaleEffect(playerPulsing ? 1.02 : 1.0)
+                        .animation(
+                            .easeInOut(duration: 2.0).repeatForever(autoreverses: true),
+                            value: playerPulsing
+                        )
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Player")
+                            .font(.pixel(titleFont))
+                            .foregroundColor(.textParchment)
+
+                        HealthHeartsView(
+                            currentHp: engine.player.currentHp,
+                            maxHp: engine.player.maxHp,
+                            heartSize: heartSize
+                        )
+
+                        ShieldView(block: engine.displayPlayerBlock, size: heartSize * 0.8)
+                    }
+                }
+                .position(x: geo.size.width * 0.18, y: geo.size.height * 0.58)
+
+                // Bottom-LEFT: Draw pile
+                VStack(spacing: 4) {
+                    Text("\(engine.deck.drawPile.count)")
+                        .font(.pixel(bodyFont))
+                        .foregroundColor(.textMuted)
+
+                    ZStack {
+                        if engine.deck.drawPile.count > 0 {
+                            ForEach(0..<min(3, engine.deck.drawPile.count), id: \.self) { i in
+                                FaceDownCard(width: cardW * 0.65, height: cardH * 0.65)
+                                    .offset(x: CGFloat(i) * 1.5, y: CGFloat(-i) * 1.5)
+                            }
+                        } else {
+                            RoundedRectangle(cornerRadius: 4)
+                                .strokeBorder(
+                                    Color.goldBorder.opacity(0.3),
+                                    style: StrokeStyle(lineWidth: 1.5, dash: [5, 3])
+                                )
+                                .frame(width: cardW * 0.65, height: cardH * 0.65)
+
+                            Text("0")
+                                .font(.pixel(bodyFont))
+                                .foregroundColor(Color.goldBorder.opacity(0.4))
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                .padding(.leading, 20)
+                .padding(.bottom, cardH * 0.15 + 10)
+
+                // Bottom-RIGHT: Energy + End Turn
+                VStack(spacing: 10) {
+                    HStack(spacing: 8) {
+                        PixelImage(name: "hud_energy_orb", width: orbSize, height: orbSize)
+                            .shadow(color: Color(hex: 0xA040D0).opacity(0.6), radius: 12)
+
+                        Text("\(engine.remainingEnergy)/\(engine.player.maxEnergy)")
+                            .font(.pixel(orbSize * 0.55))
+                            .foregroundColor(Color(hex: 0xE0C0F0))
+                    }
+
+                    Button {
+                        engine.endTurn()
+                        tooltipCardId = nil
+                        dealNewHand()
+                    } label: {
+                        Text("END TURN")
+                            .font(.pixel(smallFont))
+                            .foregroundColor(.textParchment)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            .background(
+                                LinearGradient(
+                                    colors: [Color(hex: 0x6A2028), Color(hex: 0x4A1520), Color(hex: 0x2A0A10)],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                            .shadow(color: Color(hex: 0x501414).opacity(0.4), radius: 6)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(.trailing, 20)
+                .padding(.bottom, cardH * 0.15 + 20)
+
+                // Card fan (bottom center, extends slightly below screen)
+                ZStack {
+                    let count = engine.deck.hand.count
+                    let mid = count > 1 ? Double(count - 1) / 2.0 : 0
+
+                    ForEach(Array(engine.deck.hand.enumerated()), id: \.element.id) { index, card in
+                        let t = count > 1 ? (Double(index) - mid) / mid : 0
+                        let fanAngle = t * 8.0
+                        let fanX = t * Double(handWidth) * 0.42
+                        let fanY = abs(t) * 8.0
+
+                        let isDealt = dealtCardIds.contains(card.id)
+                        let isRevealed = revealedCardIds.contains(card.id)
+                        let isSelected = engine.selectedCardIds.contains(card.id)
+
+                        let startX = Double(-handWidth) * 0.55
+                        let currentX = isDealt ? fanX : startX
+                        let currentY = (isDealt ? fanY : 0) + (isSelected ? -cardH * 0.15 : 0)
+                        let currentAngle = isDealt ? fanAngle : 0
+
+                        Group {
+                            if isRevealed {
+                                CardView(
+                                    card: card,
+                                    isSelected: isSelected,
+                                    isAffordable: engine.canAfford(card),
+                                    showTooltip: tooltipCardId == card.id,
+                                    cardWidth: cardW,
+                                    cardHeight: cardH
+                                )
+                            } else {
+                                FaceDownCard(width: cardW, height: cardH)
+                            }
+                        }
+                        .offset(x: currentX, y: currentY)
+                        .rotationEffect(.degrees(currentAngle), anchor: .bottom)
+                        .zIndex(
+                            tooltipCardId == card.id ? 200 :
+                            isSelected ? 100 + Double(index) :
+                            Double(index)
+                        )
+                        .allowsHitTesting(isRevealed)
+                        .onTapGesture {
+                            withAnimation(.easeOut(duration: 0.15)) {
+                                engine.toggleSelection(card.id)
+                            }
+                        }
+                        .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                tooltipCardId = pressing ? card.id : nil
+                            }
+                        }, perform: {})
+                        .animation(.easeOut(duration: 0.15), value: isSelected)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .offset(y: cardH * 0.12)
             }
-            .frame(width: 80)
         }
-        .padding(.horizontal, 12)
-        .background(
-            LinearGradient(
-                colors: [Color.bgPanelDark, Color(hex: 0x140F22), Color.bgPanel],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        )
+        .background(Color.bgDeep)
+        .ignoresSafeArea()
+        .onAppear {
+            playerPulsing = true
+            enemyPulsing = true
+            dealNewHand()
+        }
     }
 
-    // MARK: - Gold Divider
+    // MARK: - Deal Animation
 
-    private var goldDivider: some View {
-        LinearGradient(
-            stops: [
-                .init(color: .clear, location: 0),
-                .init(color: .goldDark, location: 0.15),
-                .init(color: .goldAccent, location: 0.35),
-                .init(color: .goldBright, location: 0.5),
-                .init(color: .goldAccent, location: 0.65),
-                .init(color: .goldDark, location: 0.85),
-                .init(color: .clear, location: 1),
-            ],
-            startPoint: .leading,
-            endPoint: .trailing
-        )
-        .frame(height: 2)
-        .padding(.horizontal, 16)
-        .background(Color.bgDeep)
+    private func dealNewHand() {
+        dealtCardIds.removeAll()
+        revealedCardIds.removeAll()
+
+        let hand = engine.deck.hand
+        for (index, card) in hand.enumerated() {
+            let slideDelay = Double(index) * 0.10
+
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(slideDelay))
+                withAnimation(.easeOut(duration: 0.28)) {
+                    dealtCardIds.insert(card.id)
+                }
+                try? await Task.sleep(for: .seconds(0.28))
+                withAnimation(.easeInOut(duration: 0.08)) {
+                    revealedCardIds.insert(card.id)
+                }
+            }
+        }
     }
 }
 
@@ -342,125 +404,60 @@ struct ContentView: View {
 
 struct CardView: View {
     let card: Card
+    let isSelected: Bool
+    let isAffordable: Bool
+    let showTooltip: Bool
+    let cardWidth: CGFloat
+    let cardHeight: CGFloat
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            HStack {
-                Text(card.name)
-                    .font(.system(size: 9, weight: .bold, design: .serif))
+        ZStack(alignment: .top) {
+            if showTooltip {
+                Text(card.description)
+                    .font(.pixel(max(cardWidth * 0.12, 14)))
                     .foregroundColor(.textParchment)
-                    .lineLimit(1)
-
-                Spacer()
-
-                ZStack {
-                    Rectangle()
-                        .fill(
-                            RadialGradient(
-                                colors: [Color(hex: 0xF0D860), Color(hex: 0xC5961A), Color(hex: 0x7A5510)],
-                                center: UnitPoint(x: 0.4, y: 0.35),
-                                startRadius: 0,
-                                endRadius: 10
-                            )
-                        )
-                        .frame(width: 14, height: 14)
-                        .rotationEffect(.degrees(45))
-
-                    Text("\(card.energyCost)")
-                        .font(.system(size: 9, weight: .heavy, design: .serif))
-                        .foregroundColor(Color(hex: 0x1A1008))
-                }
-                .frame(width: 18, height: 18)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color(hex: 0x1A1428).opacity(0.95))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(Color.goldBorder, lineWidth: 1)
+                    )
+                    .offset(y: -cardHeight * 0.25)
+                    .zIndex(10)
+                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
             }
-            .padding(.horizontal, 7)
-            .padding(.top, 6)
-            .padding(.bottom, 4)
 
-            // Header divider
-            LinearGradient(
-                stops: [
-                    .init(color: .clear, location: 0),
-                    .init(color: .goldBorder.opacity(0.4), location: 0.2),
-                    .init(color: .goldBorder.opacity(0.4), location: 0.8),
-                    .init(color: .clear, location: 1),
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(height: 1)
-            .padding(.horizontal, 6)
-
-            // Art area
-            RoundedRectangle(cornerRadius: 2)
-                .fill(cardArtGradient)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 2)
-                        .stroke(cardArtBorder, lineWidth: 0.5)
+            cardContent
+                .frame(width: cardWidth, height: cardHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .brightness(isSelected ? 0.08 : (isAffordable ? 0 : -0.15))
+                .saturation(isAffordable ? 1.0 : 0.3)
+                .shadow(
+                    color: isSelected
+                        ? Color.goldBright.opacity(0.7)
+                        : .clear,
+                    radius: isSelected ? 14 : 0
                 )
-                .padding(.horizontal, 5)
-                .padding(.vertical, 4)
-
-            // Ornate divider
-            Text("\u{2014} \u{2726} \u{2014}")
-                .font(.system(size: 5))
-                .foregroundColor(Color(hex: 0xA08240).opacity(0.45))
-                .padding(.bottom, 2)
-
-            // Description
-            Text(card.description)
-                .font(.system(size: 7, weight: .regular, design: .serif))
-                .foregroundColor(Color(hex: 0xA09880))
-                .multilineTextAlignment(.leading)
-                .lineLimit(3)
-                .padding(.horizontal, 7)
-
-            Spacer(minLength: 2)
-
-            // Type label
-            Text(card.type.rawValue.uppercased())
-                .font(.system(size: 5, weight: .bold, design: .serif))
-                .tracking(2)
-                .foregroundColor(Color(hex: 0x5A4A30))
-                .padding(.bottom, 4)
-        }
-        .frame(width: 88, height: 134)
-        .background(
-            LinearGradient(
-                colors: [Color(hex: 0x1E1828), Color(hex: 0x18122A), Color(hex: 0x100A1A)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 4))
-        .overlay(
-            RoundedRectangle(cornerRadius: 4)
-                .stroke(Color.goldBorder, lineWidth: 1.5)
-        )
-        .shadow(color: .black.opacity(0.5), radius: 4, y: 2)
-    }
-
-    private var cardArtGradient: LinearGradient {
-        switch card.type {
-        case .attack:
-            LinearGradient(
-                colors: [Color(hex: 0x3A1510), Color(hex: 0x2A0E08), Color(hex: 0x1A0804)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        case .skill:
-            LinearGradient(
-                colors: [Color(hex: 0x10203A), Color(hex: 0x0A1828), Color(hex: 0x060E1A)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+                .shadow(
+                    color: isSelected ? Color.goldBright.opacity(0.35) : .clear,
+                    radius: isSelected ? 24 : 0
+                )
         }
     }
 
-    private var cardArtBorder: Color {
-        switch card.type {
-        case .attack: Color(hex: 0x5A2518)
-        case .skill: Color(hex: 0x1A3A5A)
+    @ViewBuilder
+    private var cardContent: some View {
+        if let imageName = card.imageName {
+            Image(imageName)
+                .resizable()
+                .interpolation(.none)
+                .aspectRatio(contentMode: .fill)
+        } else {
+            Color(hex: 0x18122A)
         }
     }
 }

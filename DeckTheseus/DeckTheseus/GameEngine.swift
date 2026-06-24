@@ -13,6 +13,7 @@ struct Card: Identifiable {
     let energyCost: Int
     let damage: Int
     let block: Int
+    let imageName: String?
 
     var description: String {
         var parts: [String] = []
@@ -37,7 +38,7 @@ class Enemy {
     var name = "Slime King"
     var maxHp = 140
     var currentHp = 140
-    var intent: String? = nil
+    var currentBlock = 0
 }
 
 @Observable
@@ -51,14 +52,14 @@ class DeckManager {
         masterDeck = []
 
         for _ in 0..<5 {
-            masterDeck.append(Card(name: "Strike", type: .attack, energyCost: 1, damage: 6, block: 0))
+            masterDeck.append(Card(name: "Strike", type: .attack, energyCost: 1, damage: 6, block: 0, imageName: "card_strike_attack"))
         }
 
         for _ in 0..<4 {
-            masterDeck.append(Card(name: "Defend", type: .skill, energyCost: 1, damage: 0, block: 5))
+            masterDeck.append(Card(name: "Defend", type: .skill, energyCost: 1, damage: 0, block: 5, imageName: "card_defend_skill"))
         }
 
-        masterDeck.append(Card(name: "Bash", type: .attack, energyCost: 2, damage: 8, block: 0))
+        masterDeck.append(Card(name: "Bash", type: .attack, energyCost: 2, damage: 8, block: 0, imageName: "card_bash_attack"))
     }
 
     func startCombat() {
@@ -86,6 +87,28 @@ class GameEngine {
     var player = Player()
     var enemy = Enemy()
     var deck = DeckManager()
+    var selectedCardIds: Set<UUID> = []
+    var currentTurn = 1
+
+    var usedEnergy: Int {
+        deck.hand
+            .filter { selectedCardIds.contains($0.id) }
+            .reduce(0) { $0 + $1.energyCost }
+    }
+
+    var remainingEnergy: Int {
+        player.currentEnergy - usedEnergy
+    }
+
+    var pendingPlayerBlock: Int {
+        deck.hand
+            .filter { selectedCardIds.contains($0.id) }
+            .reduce(0) { $0 + $1.block }
+    }
+
+    var displayPlayerBlock: Int {
+        player.currentBlock + pendingPlayerBlock
+    }
 
     init() {
         deck.initializeDeck()
@@ -93,41 +116,46 @@ class GameEngine {
         deck.drawCards(5)
     }
 
-    func playCard(at handIndex: Int) {
-        guard handIndex < deck.hand.count else { return }
-        let card = deck.hand[handIndex]
+    func canAfford(_ card: Card) -> Bool {
+        if selectedCardIds.contains(card.id) { return true }
+        return remainingEnergy >= card.energyCost
+    }
 
-        guard player.currentEnergy >= card.energyCost else {
-            print("Not enough energy")
-            return
+    func toggleSelection(_ cardId: UUID) {
+        if selectedCardIds.contains(cardId) {
+            selectedCardIds.remove(cardId)
+        } else {
+            guard let card = deck.hand.first(where: { $0.id == cardId }) else { return }
+            guard remainingEnergy >= card.energyCost else { return }
+            selectedCardIds.insert(cardId)
         }
+    }
 
-        player.currentEnergy -= card.energyCost
-
-        if card.damage > 0 {
-            enemy.currentHp -= card.damage
+    func playSelectedCards() {
+        let selected = deck.hand.filter { selectedCardIds.contains($0.id) }
+        for card in selected {
+            if card.damage > 0 {
+                enemy.currentHp = max(0, enemy.currentHp - card.damage)
+            }
+            if card.block > 0 {
+                player.currentBlock += card.block
+            }
         }
-
-        if card.block > 0 {
-            player.currentBlock += card.block
-        }
-
-        let played = deck.hand.remove(at: handIndex)
-        deck.discardPile.append(played)
-
-        print("Played \(card.name) | Energy: \(player.currentEnergy)/\(player.maxEnergy) | Block: \(player.currentBlock) | Enemy HP: \(enemy.currentHp)/\(enemy.maxHp)")
+        player.currentEnergy -= usedEnergy
+        deck.hand.removeAll { selectedCardIds.contains($0.id) }
+        deck.discardPile.append(contentsOf: selected)
+        selectedCardIds.removeAll()
     }
 
     func endTurn() {
+        playSelectedCards()
+
         while !deck.hand.isEmpty {
             deck.discardPile.append(deck.hand.removeLast())
         }
 
         player.currentEnergy = player.maxEnergy
-        player.currentBlock = 0
-
+        currentTurn += 1
         deck.drawCards(5)
-
-        print("Turn ended | Draw Pile: \(deck.drawPile.count) | Discard Pile: \(deck.discardPile.count)")
     }
 }
