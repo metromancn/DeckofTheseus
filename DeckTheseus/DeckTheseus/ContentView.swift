@@ -69,20 +69,14 @@ struct HealthHeartsView: View {
     }
 
     var body: some View {
-        VStack(spacing: 2) {
-            HStack(spacing: 3) {
-                ForEach(0..<5, id: \.self) { index in
-                    Image(heartImage(at: index))
-                        .resizable()
-                        .interpolation(.none)
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: heartSize, height: heartSize)
-                }
+        HStack(spacing: -heartSize * 0.28) {
+            ForEach(0..<5, id: \.self) { index in
+                Image(heartImage(at: index))
+                    .resizable()
+                    .interpolation(.none)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: heartSize, height: heartSize)
             }
-
-            Text("\(currentHp)/\(maxHp)")
-                .font(.pixel(heartSize * 0.65))
-                .foregroundColor(Color(hex: 0xD4A0A8))
         }
     }
 }
@@ -110,6 +104,36 @@ struct ShieldView: View {
     }
 }
 
+// MARK: - Stat Block (Name + Hearts + Shield, compact)
+
+struct StatBlockView: View {
+    let name: String
+    let currentHp: Int
+    let maxHp: Int
+    let block: Int
+    let heartSize: CGFloat
+    let nameFont: CGFloat
+    var alignment: HorizontalAlignment = .center
+
+    var body: some View {
+        VStack(alignment: alignment, spacing: 0) {
+            Text(name)
+                .font(.pixel(nameFont))
+                .foregroundColor(.textParchment)
+
+            HealthHeartsView(
+                currentHp: currentHp,
+                maxHp: maxHp,
+                heartSize: heartSize
+            )
+            .padding(.top, -heartSize * 0.08)
+
+            ShieldView(block: block, size: heartSize * 0.35)
+                .padding(.top, -heartSize * 0.10)
+        }
+    }
+}
+
 // MARK: - Face Down Card
 
 struct FaceDownCard: View {
@@ -117,28 +141,10 @@ struct FaceDownCard: View {
     let height: CGFloat
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 4)
-            .fill(
-                LinearGradient(
-                    colors: [Color(hex: 0x2A1E3A), Color(hex: 0x1A1228)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 4)
-                    .stroke(Color.goldBorder, lineWidth: 1.5)
-            )
-            .overlay(
-                VStack(spacing: 4) {
-                    Text("\u{2726}")
-                        .font(.system(size: min(width, height) * 0.2))
-                        .foregroundColor(Color.goldDark.opacity(0.5))
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(Color.goldDark.opacity(0.15))
-                        .frame(width: width * 0.5, height: height * 0.03)
-                }
-            )
+        Image("card_facedown")
+            .resizable()
+            .interpolation(.none)
+            .aspectRatio(contentMode: .fit)
             .frame(width: width, height: height)
     }
 }
@@ -160,7 +166,8 @@ struct ContentView: View {
             let cardW = cardH * 0.72
             let bossH = min(unit * 0.38, 320.0)
             let playerH = bossH * 0.75
-            let heartSize = min(unit * 0.065, 42.0)
+            let heartSize = min(unit * 0.12, 80.0)
+            let nameFont = min(unit * 0.028, 18.0)
             let titleFont = min(unit * 0.030, 20.0)
             let bodyFont = min(unit * 0.026, 18.0)
             let smallFont = min(unit * 0.022, 16.0)
@@ -191,8 +198,8 @@ struct ContentView: View {
                 .padding(.top, 12)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-                // Boss (CENTER, lowered)
-                VStack(spacing: 4) {
+                // Boss (CENTER, close to middle)
+                VStack(spacing: 0) {
                     PixelImage(name: "boss_slime", height: bossH)
                         .shadow(color: Color(hex: 0x32B45A).opacity(0.4), radius: 20)
                         .scaleEffect(enemyPulsing ? 1.03 : 1.0)
@@ -200,23 +207,21 @@ struct ContentView: View {
                             .easeInOut(duration: 1.75).repeatForever(autoreverses: true),
                             value: enemyPulsing
                         )
+                        .padding(.bottom, -bossH * 0.06)
 
-                    Text("Slime King")
-                        .font(.pixel(titleFont))
-                        .foregroundColor(.textParchment)
-
-                    HealthHeartsView(
+                    StatBlockView(
+                        name: "Slime King",
                         currentHp: engine.enemy.currentHp,
                         maxHp: engine.enemy.maxHp,
-                        heartSize: heartSize
+                        block: engine.enemy.currentBlock,
+                        heartSize: heartSize,
+                        nameFont: nameFont
                     )
-
-                    ShieldView(block: engine.enemy.currentBlock, size: heartSize * 0.8)
                 }
-                .position(x: geo.size.width * 0.50, y: geo.size.height * 0.42)
+                .position(x: geo.size.width * 0.50, y: geo.size.height * 0.46)
 
-                // Player (LEFT side, LOW — just above draw pile)
-                HStack(alignment: .center, spacing: max(heartSize * 0.3, 6)) {
+                // Player (LEFT side, LOW)
+                VStack(spacing: 0) {
                     PixelImage(name: "player_sprite", height: playerH)
                         .shadow(color: Color(hex: 0xA07830).opacity(0.3), radius: 12)
                         .scaleEffect(playerPulsing ? 1.02 : 1.0)
@@ -224,22 +229,19 @@ struct ContentView: View {
                             .easeInOut(duration: 2.0).repeatForever(autoreverses: true),
                             value: playerPulsing
                         )
+                        .padding(.bottom, -playerH * 0.08)
 
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Player")
-                            .font(.pixel(titleFont))
-                            .foregroundColor(.textParchment)
-
-                        HealthHeartsView(
-                            currentHp: engine.player.currentHp,
-                            maxHp: engine.player.maxHp,
-                            heartSize: heartSize
-                        )
-
-                        ShieldView(block: engine.displayPlayerBlock, size: heartSize * 0.8)
-                    }
+                    StatBlockView(
+                        name: "Player",
+                        currentHp: engine.player.currentHp,
+                        maxHp: engine.player.maxHp,
+                        block: engine.displayPlayerBlock,
+                        heartSize: heartSize * 0.85,
+                        nameFont: nameFont,
+                        alignment: .center
+                    )
                 }
-                .position(x: geo.size.width * 0.18, y: geo.size.height * 0.58)
+                .position(x: geo.size.width * 0.15, y: geo.size.height * 0.55)
 
                 // Bottom-LEFT: Draw pile
                 VStack(spacing: 4) {
@@ -254,16 +256,11 @@ struct ContentView: View {
                                     .offset(x: CGFloat(i) * 1.5, y: CGFloat(-i) * 1.5)
                             }
                         } else {
-                            RoundedRectangle(cornerRadius: 4)
-                                .strokeBorder(
-                                    Color.goldBorder.opacity(0.3),
-                                    style: StrokeStyle(lineWidth: 1.5, dash: [5, 3])
-                                )
+                            Image("card_facedown_empty")
+                                .resizable()
+                                .interpolation(.none)
+                                .aspectRatio(contentMode: .fit)
                                 .frame(width: cardW * 0.65, height: cardH * 0.65)
-
-                            Text("0")
-                                .font(.pixel(bodyFont))
-                                .foregroundColor(Color.goldBorder.opacity(0.4))
                         }
                     }
                 }
@@ -287,20 +284,11 @@ struct ContentView: View {
                         tooltipCardId = nil
                         dealNewHand()
                     } label: {
-                        Text("END TURN")
-                            .font(.pixel(smallFont))
-                            .foregroundColor(.textParchment)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 10)
-                            .background(
-                                LinearGradient(
-                                    colors: [Color(hex: 0x6A2028), Color(hex: 0x4A1520), Color(hex: 0x2A0A10)],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
-                            )
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
-                            .shadow(color: Color(hex: 0x501414).opacity(0.4), radius: 6)
+                        Image("end_turn")
+                            .resizable()
+                            .interpolation(.none)
+                            .aspectRatio(contentMode: .fit)
+                            .frame(height: orbSize * 0.6)
                     }
                     .buttonStyle(.plain)
                 }
@@ -308,7 +296,7 @@ struct ContentView: View {
                 .padding(.trailing, 20)
                 .padding(.bottom, cardH * 0.15 + 20)
 
-                // Card fan (bottom center, extends slightly below screen)
+                // Card fan (bottom center)
                 ZStack {
                     let count = engine.deck.hand.count
                     let mid = count > 1 ? Double(count - 1) / 2.0 : 0
