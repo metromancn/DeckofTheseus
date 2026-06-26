@@ -56,9 +56,12 @@ struct HealthHeartsView: View {
     let maxHp: Int
     let heartSize: CGFloat
 
+    private let hpPerHeart = 20
+
+    private var heartCount: Int { maxHp / hpPerHeart }
+
     private func heartImage(at index: Int) -> String {
-        let hpPerHeart = Double(maxHp) / 5.0
-        let heartHp = Double(currentHp) - Double(index) * hpPerHeart
+        let heartHp = currentHp - index * hpPerHeart
         if heartHp >= hpPerHeart {
             return "health_heart_full"
         } else if heartHp > 0 {
@@ -70,7 +73,7 @@ struct HealthHeartsView: View {
 
     var body: some View {
         HStack(spacing: -heartSize * 0.55) {
-            ForEach(0..<5, id: \.self) { index in
+            ForEach(Array(0..<heartCount), id: \.self) { index in
                 Image(heartImage(at: index))
                     .resizable()
                     .interpolation(.none)
@@ -197,10 +200,11 @@ struct ContentView: View {
                             if engine.enemy.vulnerableTurns > 0 {
                                 HStack(spacing: 2) {
                                     ForEach(Array(0..<engine.enemy.vulnerableTurns), id: \.self) { _ in
-                                        Circle()
-                                            .fill(Color(hex: 0xCC2244))
-                                            .frame(width: heartSize * 0.22, height: heartSize * 0.22)
-                                            .shadow(color: Color(hex: 0xCC2244).opacity(0.6), radius: 3)
+                                        Image("status_vulnerable")
+                                            .resizable()
+                                            .interpolation(.none)
+                                            .aspectRatio(contentMode: .fit)
+                                            .frame(width: heartSize * 1.0, height: heartSize * 1.0)
                                     }
                                 }
                             }
@@ -352,6 +356,49 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 .offset(y: cardH * 0.12)
+
+                // Win/Loss overlay
+                if engine.gameState != .playing {
+                    Color.black.opacity(0.75)
+                        .ignoresSafeArea()
+
+                    VStack(spacing: 20) {
+                        Text(engine.gameState == .victory ? "VICTORY" : "DEFEAT")
+                            .font(.pixel(min(unit * 0.12, 80)))
+                            .foregroundColor(engine.gameState == .victory ? .goldBright : Color(hex: 0xCC2244))
+                            .shadow(
+                                color: engine.gameState == .victory
+                                    ? Color.goldBright.opacity(0.6)
+                                    : Color(hex: 0xCC2244).opacity(0.6),
+                                radius: 16
+                            )
+
+                        Button {
+                            engine.restartCombat()
+                            dealNewHand()
+                        } label: {
+                            Text("RESTART")
+                                .font(.pixel(min(unit * 0.05, 32)))
+                                .foregroundColor(.textParchment)
+                                .padding(.horizontal, 32)
+                                .padding(.vertical, 14)
+                                .background(
+                                    LinearGradient(
+                                        colors: [Color(hex: 0x2A1E3A), Color(hex: 0x1A1228)],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    )
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .stroke(Color.goldBorder, lineWidth: 2)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .zIndex(999)
+                }
             }
         }
         .background(Color.bgDeep)
@@ -398,42 +445,41 @@ struct CardView: View {
     let cardHeight: CGFloat
 
     var body: some View {
-        ZStack(alignment: .top) {
-            if showTooltip {
-                Text(card.description)
-                    .font(.pixel(max(cardWidth * 0.12, 14)))
-                    .foregroundColor(.textParchment)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Color(hex: 0x1A1428).opacity(0.95))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4)
-                            .stroke(Color.goldBorder, lineWidth: 1)
-                    )
-                    .offset(y: -cardHeight * 0.25)
-                    .zIndex(10)
-                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
+        cardContent
+            .frame(width: cardWidth, height: cardHeight)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .brightness(isSelected ? 0.08 : (isAffordable ? 0 : -0.15))
+            .saturation(isAffordable ? 1.0 : 0.3)
+            .shadow(
+                color: isSelected
+                    ? Color.goldBright.opacity(0.7)
+                    : .clear,
+                radius: isSelected ? 14 : 0
+            )
+            .shadow(
+                color: isSelected ? Color.goldBright.opacity(0.35) : .clear,
+                radius: isSelected ? 24 : 0
+            )
+            .overlay(alignment: .top) {
+                if showTooltip {
+                    Text(card.description)
+                        .font(.pixel(max(cardWidth * 0.12, 14)))
+                        .foregroundColor(.textParchment)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color(hex: 0x1A1428).opacity(0.95))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(Color.goldBorder, lineWidth: 1)
+                        )
+                        .fixedSize()
+                        .offset(y: -cardHeight * 0.30)
+                        .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                }
             }
-
-            cardContent
-                .frame(width: cardWidth, height: cardHeight)
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-                .brightness(isSelected ? 0.08 : (isAffordable ? 0 : -0.15))
-                .saturation(isAffordable ? 1.0 : 0.3)
-                .shadow(
-                    color: isSelected
-                        ? Color.goldBright.opacity(0.7)
-                        : .clear,
-                    radius: isSelected ? 14 : 0
-                )
-                .shadow(
-                    color: isSelected ? Color.goldBright.opacity(0.35) : .clear,
-                    radius: isSelected ? 24 : 0
-                )
-        }
     }
 
     @ViewBuilder

@@ -1,0 +1,12 @@
+{
+  "images" : [
+    {
+      "filename" : "status_vulnerable.png",
+      "idiom" : "universal"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}

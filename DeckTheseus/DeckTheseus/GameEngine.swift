@@ -9,6 +9,14 @@ enum CardType: String {
     case status
 }
 
+// MARK: - Game State
+
+enum GameState {
+    case playing
+    case victory
+    case defeat
+}
+
 struct Card: Identifiable {
     let id = UUID()
     let name: String
@@ -46,7 +54,7 @@ struct Card: Identifiable {
 
     static func slime() -> Card {
         Card(name: "Slime", type: .status, energyCost: 1, damage: 0, block: 0,
-             imageName: nil, isExhaustible: true)
+             imageName: "card_slimed_status", isExhaustible: true)
     }
 }
 
@@ -110,6 +118,14 @@ class Enemy {
         default: break
         }
     }
+
+    func reset() {
+        currentHp = maxHp
+        currentBlock = 0
+        strength = 0
+        vulnerableTurns = 0
+        nextMove = .tackle(baseDamage: 12)
+    }
 }
 
 // MARK: - Deck Manager
@@ -171,6 +187,7 @@ class GameEngine {
     var deck = DeckManager()
     var selectedCardIds: Set<UUID> = []
     var currentTurn = 1
+    var gameState: GameState = .playing
 
     var usedEnergy: Int {
         deck.hand
@@ -205,6 +222,7 @@ class GameEngine {
     }
 
     func toggleSelection(_ cardId: UUID) {
+        guard gameState == .playing else { return }
         if selectedCardIds.contains(cardId) {
             selectedCardIds.remove(cardId)
         } else {
@@ -214,12 +232,25 @@ class GameEngine {
         }
     }
 
+    // MARK: - Combat Resolution
+
+    private func checkCombatResolution() {
+        if enemy.currentHp <= 0 {
+            enemy.currentHp = 0
+            player.currentHp = player.maxHp
+            gameState = .victory
+        } else if player.currentHp <= 0 {
+            player.currentHp = 0
+            gameState = .defeat
+        }
+    }
+
     // MARK: - Play Cards
 
     func playSelectedCards() {
+        guard gameState == .playing else { return }
         let selected = deck.hand.filter { selectedCardIds.contains($0.id) }
         for card in selected {
-            // Deal damage (vulnerable bonus from PREVIOUS applications only)
             if card.damage > 0 {
                 var raw = card.damage
                 if enemy.vulnerableTurns > 0 {
@@ -228,14 +259,15 @@ class GameEngine {
                 let afterBlock = applyDamageToEnemy(raw)
                 enemy.currentHp = max(0, enemy.currentHp - afterBlock)
             }
-            // Gain block
             if card.block > 0 {
                 player.currentBlock += card.block
             }
-            // Apply vulnerable AFTER this card's damage resolves
             if card.vulnerableApply > 0 {
                 enemy.vulnerableTurns += card.vulnerableApply
             }
+
+            checkCombatResolution()
+            if gameState != .playing { break }
         }
         player.currentEnergy -= usedEnergy
         deck.hand.removeAll { selectedCardIds.contains($0.id) }
@@ -281,22 +313,45 @@ class GameEngine {
             enemy.clearDebuffs()
         }
 
+        checkCombatResolution()
     }
 
     // MARK: - End Turn
 
     func endTurn() {
+        guard gameState == .playing else { return }
+
         playSelectedCards()
+        if gameState != .playing { return }
 
         while !deck.hand.isEmpty {
             deck.discardPile.append(deck.hand.removeLast())
         }
 
         executeEnemyTurn()
+        if gameState != .playing { return }
 
         player.currentEnergy = player.maxEnergy
         currentTurn += 1
         enemy.advanceIntent(forTurn: currentTurn)
         deck.drawCards(5)
+    }
+
+    // MARK: - Restart
+
+    func restartCombat() {
+        player.currentHp = player.maxHp
+        player.currentBlock = 0
+        player.currentEnergy = player.maxEnergy
+
+        enemy.reset()
+
+        deck.startCombat()
+        deck.drawCards(5)
+
+        selectedCardIds.removeAll()
+        currentTurn = 1
+        enemy.advanceIntent(forTurn: currentTurn)
+        gameState = .playing
     }
 }
