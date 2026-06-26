@@ -179,7 +179,7 @@ struct ContentView: View {
                         )
                         .padding(.bottom, -bossH * 0.06)
 
-                    // Boss stats: name, then hearts+shield inline
+                    // Boss stats: name, then hearts+shield+debuffs inline
                     VStack(alignment: .center, spacing: 0) {
                         Text("Slime King")
                             .font(.pixel(nameFont))
@@ -193,6 +193,17 @@ struct ContentView: View {
                             )
 
                             ShieldView(block: engine.enemy.currentBlock, size: heartSize * 0.30)
+
+                            if engine.enemy.vulnerableTurns > 0 {
+                                HStack(spacing: 2) {
+                                    ForEach(Array(0..<engine.enemy.vulnerableTurns), id: \.self) { _ in
+                                        Circle()
+                                            .fill(Color(hex: 0xCC2244))
+                                            .frame(width: heartSize * 0.22, height: heartSize * 0.22)
+                                            .shadow(color: Color(hex: 0xCC2244).opacity(0.6), radius: 3)
+                                    }
+                                }
+                            }
                         }
                         .padding(.top, -heartSize * 0.10)
                     }
