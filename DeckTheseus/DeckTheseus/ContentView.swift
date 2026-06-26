@@ -69,7 +69,7 @@ struct HealthHeartsView: View {
     }
 
     var body: some View {
-        HStack(spacing: -heartSize * 0.28) {
+        HStack(spacing: -heartSize * 0.55) {
             ForEach(0..<5, id: \.self) { index in
                 Image(heartImage(at: index))
                     .resizable()
@@ -100,36 +100,6 @@ struct ShieldView: View {
             Text("\(block)")
                 .font(.pixel(size * 0.55))
                 .foregroundColor(block > 0 ? .white : Color(hex: 0x2A3848))
-        }
-    }
-}
-
-// MARK: - Stat Block (Name + Hearts + Shield, compact)
-
-struct StatBlockView: View {
-    let name: String
-    let currentHp: Int
-    let maxHp: Int
-    let block: Int
-    let heartSize: CGFloat
-    let nameFont: CGFloat
-    var alignment: HorizontalAlignment = .center
-
-    var body: some View {
-        VStack(alignment: alignment, spacing: 0) {
-            Text(name)
-                .font(.pixel(nameFont))
-                .foregroundColor(.textParchment)
-
-            HealthHeartsView(
-                currentHp: currentHp,
-                maxHp: maxHp,
-                heartSize: heartSize
-            )
-            .padding(.top, -heartSize * 0.08)
-
-            ShieldView(block: block, size: heartSize * 0.35)
-                .padding(.top, -heartSize * 0.10)
         }
     }
 }
@@ -165,22 +135,22 @@ struct ContentView: View {
             let cardH = min(unit * 0.30, 260.0)
             let cardW = cardH * 0.72
             let bossH = min(unit * 0.38, 320.0)
-            let playerH = bossH * 0.75
             let heartSize = min(unit * 0.12, 80.0)
             let nameFont = min(unit * 0.028, 18.0)
             let titleFont = min(unit * 0.030, 20.0)
             let bodyFont = min(unit * 0.026, 18.0)
-            let smallFont = min(unit * 0.022, 16.0)
             let orbSize = max(unit * 0.09, 50.0)
             let handWidth = geo.size.width * 0.52
+            let controlW = cardW * 1.1
 
             ZStack {
-                // Background
-                LinearGradient(
-                    colors: [Color(hex: 0x0A0816), Color(hex: 0x0C0A14), Color(hex: 0x14101E)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
+                // Background — fill screen, slight crop OK
+                Image("battle_background")
+                    .resizable()
+                    .interpolation(.none)
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .clipped()
 
                 // Top-left: Floor-Act + Turn
                 HStack(spacing: 12) {
@@ -198,7 +168,7 @@ struct ContentView: View {
                 .padding(.top, 12)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-                // Boss (CENTER, close to middle)
+                // Boss (CENTER) — DO NOT MOVE sprite, only stats below
                 VStack(spacing: 0) {
                     PixelImage(name: "boss_slime", height: bossH)
                         .shadow(color: Color(hex: 0x32B45A).opacity(0.4), radius: 20)
@@ -209,42 +179,58 @@ struct ContentView: View {
                         )
                         .padding(.bottom, -bossH * 0.06)
 
-                    StatBlockView(
-                        name: "Slime King",
-                        currentHp: engine.enemy.currentHp,
-                        maxHp: engine.enemy.maxHp,
-                        block: engine.enemy.currentBlock,
-                        heartSize: heartSize,
-                        nameFont: nameFont
-                    )
+                    // Boss stats: name, then hearts+shield inline
+                    VStack(alignment: .center, spacing: 0) {
+                        Text("Slime King")
+                            .font(.pixel(nameFont))
+                            .foregroundColor(.textParchment)
+
+                        HStack(spacing: 2) {
+                            HealthHeartsView(
+                                currentHp: engine.enemy.currentHp,
+                                maxHp: engine.enemy.maxHp,
+                                heartSize: heartSize
+                            )
+
+                            ShieldView(block: engine.enemy.currentBlock, size: heartSize * 0.30)
+                        }
+                        .padding(.top, -heartSize * 0.10)
+                    }
                 }
                 .position(x: geo.size.width * 0.50, y: geo.size.height * 0.46)
 
-                // Player (LEFT side, LOW)
-                VStack(spacing: 0) {
-                    PixelImage(name: "player_sprite", height: playerH)
+                // Player (LEFT, above draw pile, same size as card_facedown)
+                HStack(alignment: .center, spacing: 4) {
+                    PixelImage(name: "player_sprite", width: cardW, height: cardH)
                         .shadow(color: Color(hex: 0xA07830).opacity(0.3), radius: 12)
                         .scaleEffect(playerPulsing ? 1.02 : 1.0)
                         .animation(
                             .easeInOut(duration: 2.0).repeatForever(autoreverses: true),
                             value: playerPulsing
                         )
-                        .padding(.bottom, -playerH * 0.08)
 
-                    StatBlockView(
-                        name: "Player",
-                        currentHp: engine.player.currentHp,
-                        maxHp: engine.player.maxHp,
-                        block: engine.displayPlayerBlock,
-                        heartSize: heartSize * 0.85,
-                        nameFont: nameFont,
-                        alignment: .center
-                    )
+                    // Player stats: name, then hearts+shield inline, left-aligned
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text("Player")
+                            .font(.pixel(nameFont))
+                            .foregroundColor(.textParchment)
+
+                        HStack(spacing: 2) {
+                            HealthHeartsView(
+                                currentHp: engine.player.currentHp,
+                                maxHp: engine.player.maxHp,
+                                heartSize: heartSize * 0.85
+                            )
+
+                            ShieldView(block: engine.displayPlayerBlock, size: heartSize * 0.25)
+                        }
+                        .padding(.top, -heartSize * 0.08)
+                    }
                 }
-                .position(x: geo.size.width * 0.15, y: geo.size.height * 0.55)
+                .position(x: geo.size.width * 0.18, y: geo.size.height * 0.58)
 
-                // Bottom-LEFT: Draw pile
-                VStack(spacing: 4) {
+                // Bottom-LEFT: Draw pile with count right above
+                VStack(spacing: 1) {
                     Text("\(engine.deck.drawPile.count)")
                         .font(.pixel(bodyFont))
                         .foregroundColor(.textMuted)
@@ -252,32 +238,33 @@ struct ContentView: View {
                     ZStack {
                         if engine.deck.drawPile.count > 0 {
                             ForEach(0..<min(3, engine.deck.drawPile.count), id: \.self) { i in
-                                FaceDownCard(width: cardW * 0.65, height: cardH * 0.65)
-                                    .offset(x: CGFloat(i) * 1.5, y: CGFloat(-i) * 1.5)
+                                FaceDownCard(width: cardW, height: cardH)
+                                    .offset(x: CGFloat(i) * 2, y: CGFloat(-i) * 2)
                             }
                         } else {
                             Image("card_facedown_empty")
                                 .resizable()
                                 .interpolation(.none)
                                 .aspectRatio(contentMode: .fit)
-                                .frame(width: cardW * 0.65, height: cardH * 0.65)
+                                .frame(width: cardW, height: cardH)
                         }
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                .padding(.leading, 20)
-                .padding(.bottom, cardH * 0.15 + 10)
+                .padding(.leading, 16)
+                .padding(.bottom, -cardH * 0.08)
 
-                // Bottom-RIGHT: Energy + End Turn
-                VStack(spacing: 10) {
-                    HStack(spacing: 8) {
-                        PixelImage(name: "hud_energy_orb", width: orbSize, height: orbSize)
-                            .shadow(color: Color(hex: 0xA040D0).opacity(0.6), radius: 12)
+                // Bottom-RIGHT: Energy on top, End Turn below (same width)
+                VStack(spacing: 4) {
+                    HStack(spacing: 6) {
+                        PixelImage(name: "hud_energy_orb", width: orbSize * 0.7, height: orbSize * 0.7)
+                            .shadow(color: Color(hex: 0xA040D0).opacity(0.6), radius: 10)
 
                         Text("\(engine.remainingEnergy)/\(engine.player.maxEnergy)")
-                            .font(.pixel(orbSize * 0.55))
+                            .font(.pixel(orbSize * 0.45))
                             .foregroundColor(Color(hex: 0xE0C0F0))
                     }
+                    .frame(width: controlW)
 
                     Button {
                         engine.endTurn()
@@ -288,13 +275,13 @@ struct ContentView: View {
                             .resizable()
                             .interpolation(.none)
                             .aspectRatio(contentMode: .fit)
-                            .frame(height: orbSize * 0.6)
+                            .frame(width: controlW)
                     }
                     .buttonStyle(.plain)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                .padding(.trailing, 20)
-                .padding(.bottom, cardH * 0.15 + 20)
+                .padding(.trailing, 16)
+                .padding(.bottom, cardH * 0.05)
 
                 // Card fan (bottom center)
                 ZStack {
@@ -330,6 +317,7 @@ struct ContentView: View {
                                 FaceDownCard(width: cardW, height: cardH)
                             }
                         }
+                        .contentShape(Rectangle())
                         .offset(x: currentX, y: currentY)
                         .rotationEffect(.degrees(currentAngle), anchor: .bottom)
                         .zIndex(
