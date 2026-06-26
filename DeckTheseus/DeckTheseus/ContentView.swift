@@ -62,9 +62,9 @@ struct HealthHeartsView: View {
 
     private func heartImage(at index: Int) -> String {
         let heartHp = currentHp - index * hpPerHeart
-        if heartHp >= hpPerHeart {
+        if heartHp >= 11 {
             return "health_heart_full"
-        } else if heartHp > 0 {
+        } else if heartHp >= 1 {
             return "health_heart_half"
         } else {
             return "health_heart_none"
