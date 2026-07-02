@@ -17,6 +17,20 @@ enum GameState {
     case defeat
 }
 
+// MARK: - Turn / VFX State
+
+enum TurnBanner {
+    case none
+    case playerTurn
+    case enemyTurn
+}
+
+enum SpriteVFX {
+    case none
+    case attack       // basic_attack_animation
+    case healDebuff   // heal_debuff_animation2
+}
+
 struct Card: Identifiable {
     let id = UUID()
     let name: String
@@ -189,6 +203,12 @@ class GameEngine {
     var currentTurn = 1
     var gameState: GameState = .playing
 
+    // Turn-flow + VFX presentation state (driven by the view's orchestrator)
+    var turnBanner: TurnBanner = .none
+    var playerVFX: SpriteVFX = .none
+    var enemyVFX: SpriteVFX = .none
+    var isResolvingTurn = false
+
     var usedEnergy: Int {
         deck.hand
             .filter { selectedCardIds.contains($0.id) }
@@ -337,6 +357,49 @@ class GameEngine {
         deck.drawCards(5)
     }
 
+    // MARK: - Granular Turn Steps (for animated orchestration)
+
+    /// Move any remaining cards in hand to the discard pile.
+    func discardHand() {
+        while !deck.hand.isEmpty {
+            deck.discardPile.append(deck.hand.removeLast())
+        }
+    }
+
+    /// Public wrapper so the view can run the enemy's queued move on its own beat.
+    func runEnemyTurn() {
+        guard gameState == .playing else { return }
+        executeEnemyTurn()
+    }
+
+    /// Refresh energy, advance the turn counter/intent, and draw a new hand.
+    func beginNextTurn() {
+        guard gameState == .playing else { return }
+        player.currentEnergy = player.maxEnergy
+        currentTurn += 1
+        enemy.advanceIntent(forTurn: currentTurn)
+        deck.drawCards(5)
+    }
+
+    // Detection helpers for choosing which VFX to play.
+    var selectedDealsDamage: Bool {
+        deck.hand.contains { selectedCardIds.contains($0.id) && $0.damage > 0 }
+    }
+
+    var selectedGivesBlock: Bool {
+        deck.hand.contains { selectedCardIds.contains($0.id) && $0.block > 0 }
+    }
+
+    var enemyIntentAttacks: Bool {
+        if case .tackle = enemy.nextMove { return true }
+        return false
+    }
+
+    var enemyIntentBuffsSelf: Bool {
+        if case .harden = enemy.nextMove { return true }
+        return false
+    }
+
     // MARK: - Restart
 
     func restartCombat() {
@@ -352,6 +415,10 @@ class GameEngine {
         selectedCardIds.removeAll()
         currentTurn = 1
         enemy.advanceIntent(forTurn: currentTurn)
+        turnBanner = .none
+        playerVFX = .none
+        enemyVFX = .none
+        isResolvingTurn = false
         gameState = .playing
     }
 }

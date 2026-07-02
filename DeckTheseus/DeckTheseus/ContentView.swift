@@ -122,6 +122,54 @@ struct FaceDownCard: View {
     }
 }
 
+// MARK: - Combat VFX Overlay
+
+struct SpriteVFXView: View {
+    let vfx: SpriteVFX
+    let size: CGFloat
+
+    @State private var frame = 0
+
+    private static let frameDuration = 0.08
+
+    private var prefix: String? {
+        switch vfx {
+        case .attack: return "basic_attack_animation"
+        case .healDebuff: return "heal_debuff_animation2"
+        case .none: return nil
+        }
+    }
+
+    private var frameCount: Int {
+        switch vfx {
+        case .attack: return 9
+        case .healDebuff: return 10
+        case .none: return 0
+        }
+    }
+
+    var body: some View {
+        if let prefix {
+            let index = min(frame, frameCount - 1) + 1
+            let frameName = String(format: "%@_%04d", prefix, index)
+            Image(frameName)
+                .resizable()
+                .interpolation(.none)
+                .aspectRatio(contentMode: .fit)
+                .frame(width: size, height: size)
+                .allowsHitTesting(false)
+                .task(id: vfx) {
+                    frame = 0
+                    while frame < frameCount - 1 {
+                        try? await Task.sleep(for: .seconds(Self.frameDuration))
+                        if Task.isCancelled { return }
+                        frame += 1
+                    }
+                }
+        }
+    }
+}
+
 // MARK: - Content View
 
 struct ContentView: View {
@@ -180,6 +228,9 @@ struct ContentView: View {
                             .easeInOut(duration: 1.75).repeatForever(autoreverses: true),
                             value: enemyPulsing
                         )
+                        .overlay {
+                            SpriteVFXView(vfx: engine.enemyVFX, size: bossH * 0.85)
+                        }
                         .padding(.bottom, -bossH * 0.06)
 
                     // Boss stats: name, then hearts+shield+debuffs inline
@@ -198,7 +249,7 @@ struct ContentView: View {
                             ShieldView(block: engine.enemy.currentBlock, size: heartSize * 0.30)
 
                             if engine.enemy.vulnerableTurns > 0 {
-                                HStack(spacing: 2) {
+                                HStack(spacing: -heartSize * 0.45) {
                                     ForEach(Array(0..<engine.enemy.vulnerableTurns), id: \.self) { _ in
                                         Image("status_vulnerable")
                                             .resizable()
@@ -223,6 +274,9 @@ struct ContentView: View {
                             .easeInOut(duration: 2.0).repeatForever(autoreverses: true),
                             value: playerPulsing
                         )
+                        .overlay {
+                            SpriteVFXView(vfx: engine.playerVFX, size: cardH * 0.85)
+                        }
 
                     // Player stats: name, then hearts+shield inline, left-aligned
                     VStack(alignment: .leading, spacing: 0) {
@@ -282,9 +336,7 @@ struct ContentView: View {
                     .frame(width: controlW)
 
                     Button {
-                        engine.endTurn()
-                        tooltipCardId = nil
-                        dealNewHand()
+                        resolveTurn()
                     } label: {
                         Image("end_turn")
                             .resizable()
@@ -293,6 +345,7 @@ struct ContentView: View {
                             .frame(width: controlW)
                     }
                     .buttonStyle(.plain)
+                    .disabled(engine.isResolvingTurn)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 .padding(.trailing, 16)
@@ -302,12 +355,14 @@ struct ContentView: View {
                 ZStack {
                     let count = engine.deck.hand.count
                     let mid = count > 1 ? Double(count - 1) / 2.0 : 0
+                    // Fewer cards → tighter, smaller semi-circle.
+                    let spreadScale = min(1.0, Double(count) / 5.0)
 
                     ForEach(Array(engine.deck.hand.enumerated()), id: \.element.id) { index, card in
                         let t = count > 1 ? (Double(index) - mid) / mid : 0
-                        let fanAngle = t * 8.0
-                        let fanX = t * Double(handWidth) * 0.42
-                        let fanY = abs(t) * 8.0
+                        let fanAngle = t * 8.0 * spreadScale
+                        let fanX = t * Double(handWidth) * 0.42 * spreadScale
+                        let fanY = abs(t) * 8.0 * spreadScale
 
                         let isDealt = dealtCardIds.contains(card.id)
                         let isRevealed = revealedCardIds.contains(card.id)
@@ -340,7 +395,7 @@ struct ContentView: View {
                             isSelected ? 100 + Double(index) :
                             Double(index)
                         )
-                        .allowsHitTesting(isRevealed)
+                        .allowsHitTesting(isRevealed && !engine.isResolvingTurn)
                         .onTapGesture {
                             withAnimation(.easeOut(duration: 0.15)) {
                                 engine.toggleSelection(card.id)
@@ -352,10 +407,32 @@ struct ContentView: View {
                             }
                         }, perform: {})
                         .animation(.easeOut(duration: 0.15), value: isSelected)
+                        .animation(.easeInOut(duration: 0.3), value: count)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 .offset(y: cardH * 0.12)
+
+                // Turn-state notifier banner
+                if engine.turnBanner != .none {
+                    let isPlayer = engine.turnBanner == .playerTurn
+                    Text(isPlayer ? "PLAYER TURN" : "ENEMY TURN")
+                        .font(.pixel(min(unit * 0.085, 60)))
+                        .foregroundColor(isPlayer ? .goldBright : Color(hex: 0xCC2244))
+                        .padding(.horizontal, 28)
+                        .padding(.vertical, 12)
+                        .background(
+                            Capsule()
+                                .fill(Color.black.opacity(0.55))
+                        )
+                        .shadow(
+                            color: isPlayer ? Color.goldBright.opacity(0.5) : Color(hex: 0xCC2244).opacity(0.5),
+                            radius: 14
+                        )
+                        .transition(.opacity.combined(with: .scale(scale: 0.85)))
+                        .allowsHitTesting(false)
+                        .zIndex(800)
+                }
 
                 // Win/Loss overlay
                 if engine.gameState != .playing {
@@ -407,6 +484,99 @@ struct ContentView: View {
             playerPulsing = true
             enemyPulsing = true
             dealNewHand()
+        }
+    }
+
+    // MARK: - Turn Resolution Orchestrator
+
+    // Frame sequence durations (frameCount steps * 0.08s + lingering buffer).
+    private let attackAnimDuration = 0.72   // 9 frames
+    private let healAnimDuration = 0.8      // 10 frames
+    private let comprehendPause = 0.8       // beat so the user can read the board
+
+    private func resolveTurn() {
+        guard !engine.isResolvingTurn, engine.gameState == .playing else { return }
+        engine.isResolvingTurn = true
+        tooltipCardId = nil
+
+        // Snapshot what the player's selection will do before it's consumed.
+        let playerWillAttack = engine.selectedDealsDamage
+        let playerWillShield = engine.selectedGivesBlock
+
+        Task { @MainActor in
+            // 1. Short beat after pressing End Turn — the player's hand stays on screen.
+            try? await Task.sleep(for: .seconds(0.35))
+
+            // 2. Resolve the player's cards, then play their animation.
+            engine.playSelectedCards()
+            if playerWillAttack { triggerVFX(.attack, on: \.enemyVFX) }
+            if playerWillShield { triggerVFX(.healDebuff, on: \.playerVFX) }
+            let playerAnim = max(playerWillAttack ? attackAnimDuration : 0,
+                                 playerWillShield ? healAnimDuration : 0)
+            if playerAnim > 0 {
+                try? await Task.sleep(for: .seconds(playerAnim))
+                clearVFX()
+            }
+
+            if engine.gameState != .playing { engine.isResolvingTurn = false; return }
+
+            // 3. Let the result sink in before the enemy acts.
+            try? await Task.sleep(for: .seconds(comprehendPause))
+
+            // 4. Enemy turn notification (player's leftover cards are still on screen).
+            await showBanner(.enemyTurn, hold: 0.9)
+            try? await Task.sleep(for: .seconds(0.3))
+
+            // 5. Resolve the enemy's queued move, then play its animation.
+            let enemyWillAttack = engine.enemyIntentAttacks
+            let enemyWillBuffSelf = engine.enemyIntentBuffsSelf
+            engine.runEnemyTurn()
+            if enemyWillAttack { triggerVFX(.attack, on: \.playerVFX) }
+            if enemyWillBuffSelf { triggerVFX(.healDebuff, on: \.enemyVFX) }
+            let enemyAnim = max(enemyWillAttack ? attackAnimDuration : 0,
+                                enemyWillBuffSelf ? healAnimDuration : 0)
+            if enemyAnim > 0 {
+                try? await Task.sleep(for: .seconds(enemyAnim))
+                clearVFX()
+            }
+
+            if engine.gameState != .playing { engine.isResolvingTurn = false; return }
+
+            // 6. Let the enemy's result sink in.
+            try? await Task.sleep(for: .seconds(comprehendPause))
+
+            // 7. Player turn notification.
+            await showBanner(.playerTurn, hold: 0.9)
+            try? await Task.sleep(for: .seconds(0.3))
+
+            // 8. Now swap out the old hand and deal fresh cards.
+            engine.discardHand()
+            engine.beginNextTurn()
+            engine.isResolvingTurn = false
+            dealNewHand()
+        }
+    }
+
+    @MainActor
+    private func showBanner(_ banner: TurnBanner, hold: Double) async {
+        withAnimation(.easeInOut(duration: 0.2)) { engine.turnBanner = banner }
+        try? await Task.sleep(for: .seconds(hold))
+        withAnimation(.easeInOut(duration: 0.2)) { engine.turnBanner = .none }
+        try? await Task.sleep(for: .seconds(0.1))
+    }
+
+    @MainActor
+    private func triggerVFX(_ vfx: SpriteVFX, on keyPath: ReferenceWritableKeyPath<GameEngine, SpriteVFX>) {
+        withAnimation(.easeOut(duration: 0.15)) {
+            engine[keyPath: keyPath] = vfx
+        }
+    }
+
+    @MainActor
+    private func clearVFX() {
+        withAnimation(.easeOut(duration: 0.2)) {
+            engine.playerVFX = .none
+            engine.enemyVFX = .none
         }
     }
 

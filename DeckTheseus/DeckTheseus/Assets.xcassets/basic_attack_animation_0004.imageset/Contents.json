@@ -1,0 +1,12 @@
+{
+  "images" : [
+    {
+      "filename" : "basic_attack_animation_0004.png",
+      "idiom" : "universal"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
