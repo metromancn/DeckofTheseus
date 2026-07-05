@@ -49,19 +49,42 @@ struct PixelImage: View {
     }
 }
 
+// MARK: - Cropped Sprite (trims transparent canvas padding from layout)
+
+struct CroppedSprite: View {
+    let name: String
+    let contentW: CGFloat   // visible content width as a fraction of the 64px canvas
+    let contentH: CGFloat   // visible content height as a fraction of the 64px canvas
+    let targetH: CGFloat    // desired on-screen height of the visible content
+
+    var body: some View {
+        let full = targetH / contentH   // scale the whole canvas so content == targetH
+        Image(name)
+            .resizable()
+            .interpolation(.none)
+            .frame(width: full, height: full)
+            .frame(width: full * contentW, height: targetH)  // clip layout to content
+            .clipped()
+    }
+}
+
 // MARK: - Health Hearts (Pixel Art)
 
 struct HealthHeartsView: View {
     let currentHp: Int
     let maxHp: Int
     let heartSize: CGFloat
+    var depleteFromLeft: Bool = false
 
     private let hpPerHeart = 20
 
     private var heartCount: Int { maxHp / hpPerHeart }
 
     private func heartImage(at index: Int) -> String {
-        let heartHp = currentHp - index * hpPerHeart
+        // Which "logical" slot this display position maps to. When depleting
+        // from the left, the leftmost icon empties first (full hearts stay right).
+        let slot = depleteFromLeft ? (heartCount - 1 - index) : index
+        let heartHp = currentHp - slot * hpPerHeart
         if heartHp >= 11 {
             return "health_heart_full"
         } else if heartHp >= 1 {
@@ -179,6 +202,7 @@ struct ContentView: View {
     @State private var tooltipCardId: UUID? = nil
     @State private var dealtCardIds: Set<UUID> = []
     @State private var revealedCardIds: Set<UUID> = []
+    @State private var isEnemyTurn = false
 
     var body: some View {
         GeometryReader { geo in
@@ -192,7 +216,13 @@ struct ContentView: View {
             let bodyFont = min(unit * 0.026, 18.0)
             let orbSize = max(unit * 0.09, 50.0)
             let handWidth = geo.size.width * 0.52
-            let controlW = cardW * 1.1
+
+            // Sprite layout (equal margins from each screen edge, both on same level)
+            let sideMargin = geo.size.width * 0.10         // more inward from the edges
+            let bossSpriteH = min(unit * 0.20, 175.0)      // boss a bit bigger
+            let playerSpriteH = bossSpriteH * 0.78         // player smaller than boss
+            let spriteTopPad = geo.size.height * 0.25      // sit low in the arena
+            let statGap = heartSize * 0.14   // sprite→hearts (compact)
 
             ZStack {
                 // Background — fill screen, slight crop OK
@@ -219,55 +249,15 @@ struct ContentView: View {
                 .padding(.top, 12)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-                // Boss (CENTER) — DO NOT MOVE sprite, only stats below
-                VStack(spacing: 0) {
-                    PixelImage(name: "boss_slime", height: bossH)
-                        .shadow(color: Color(hex: 0x32B45A).opacity(0.4), radius: 20)
-                        .scaleEffect(enemyPulsing ? 1.03 : 1.0)
-                        .animation(
-                            .easeInOut(duration: 1.75).repeatForever(autoreverses: true),
-                            value: enemyPulsing
-                        )
-                        .overlay {
-                            SpriteVFXView(vfx: engine.enemyVFX, size: bossH * 0.85)
-                        }
-                        .padding(.bottom, -bossH * 0.06)
+                // Player (LEFT) — compact: name, sprite, hearts+shield all adjacent, left-aligned
+                VStack(alignment: .leading, spacing: statGap) {
+                    Text("Player")
+                        .font(.pixel(nameFont))
+                        .foregroundColor(.textParchment)
+                        .frame(height: nameFont * 1.3, alignment: .center)
+                        .padding(.bottom, statGap)
 
-                    // Boss stats: name, then hearts+shield+debuffs inline
-                    VStack(alignment: .center, spacing: 0) {
-                        Text("Slime King")
-                            .font(.pixel(nameFont))
-                            .foregroundColor(.textParchment)
-
-                        HStack(spacing: 2) {
-                            HealthHeartsView(
-                                currentHp: engine.enemy.currentHp,
-                                maxHp: engine.enemy.maxHp,
-                                heartSize: heartSize
-                            )
-
-                            ShieldView(block: engine.enemy.currentBlock, size: heartSize * 0.30)
-
-                            if engine.enemy.vulnerableTurns > 0 {
-                                HStack(spacing: -heartSize * 0.45) {
-                                    ForEach(Array(0..<engine.enemy.vulnerableTurns), id: \.self) { _ in
-                                        Image("status_vulnerable")
-                                            .resizable()
-                                            .interpolation(.none)
-                                            .aspectRatio(contentMode: .fit)
-                                            .frame(width: heartSize * 1.0, height: heartSize * 1.0)
-                                    }
-                                }
-                            }
-                        }
-                        .padding(.top, -heartSize * 0.10)
-                    }
-                }
-                .position(x: geo.size.width * 0.50, y: geo.size.height * 0.46)
-
-                // Player (LEFT, above draw pile, same size as card_facedown)
-                HStack(alignment: .center, spacing: 4) {
-                    PixelImage(name: "player_sprite", width: cardW, height: cardH)
+                    CroppedSprite(name: "player_sprite", contentW: 0.33, contentH: 0.4375, targetH: playerSpriteH)
                         .shadow(color: Color(hex: 0xA07830).opacity(0.3), radius: 12)
                         .scaleEffect(playerPulsing ? 1.02 : 1.0)
                         .animation(
@@ -275,34 +265,77 @@ struct ContentView: View {
                             value: playerPulsing
                         )
                         .overlay {
-                            SpriteVFXView(vfx: engine.playerVFX, size: cardH * 0.85)
+                            SpriteVFXView(vfx: engine.playerVFX, size: playerSpriteH * 0.9)
                         }
+                        .frame(height: bossSpriteH, alignment: .bottom)   // stand on the same ground as the boss
 
-                    // Player stats: name, then hearts+shield inline, left-aligned
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text("Player")
-                            .font(.pixel(nameFont))
-                            .foregroundColor(.textParchment)
+                    HStack(spacing: 2) {
+                        HealthHeartsView(
+                            currentHp: engine.player.currentHp,
+                            maxHp: engine.player.maxHp,
+                            heartSize: heartSize
+                        )
 
-                        HStack(spacing: 2) {
-                            HealthHeartsView(
-                                currentHp: engine.player.currentHp,
-                                maxHp: engine.player.maxHp,
-                                heartSize: heartSize * 0.85
-                            )
-
-                            ShieldView(block: engine.displayPlayerBlock, size: heartSize * 0.25)
-                        }
-                        .padding(.top, -heartSize * 0.08)
+                        ShieldView(block: engine.displayPlayerBlock, size: heartSize * 0.30)
                     }
                 }
-                .position(x: geo.size.width * 0.18, y: geo.size.height * 0.58)
+                .padding(.top, spriteTopPad)
+                .padding(.leading, sideMargin)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+                // Boss (RIGHT) — compact, right-aligned; hearts deplete from the left; status under hearts
+                VStack(alignment: .trailing, spacing: statGap) {
+                    Text("Slime King")
+                        .font(.pixel(nameFont))
+                        .foregroundColor(.textParchment)
+                        .frame(width: bossSpriteH * 1.055, height: nameFont * 1.3, alignment: .trailing)
+                        .padding(.bottom, statGap)
+
+                    CroppedSprite(name: "boss_slime", contentW: 0.61, contentH: 0.578, targetH: bossSpriteH)
+                        .shadow(color: Color(hex: 0x32B45A).opacity(0.4), radius: 20)
+                        .scaleEffect(enemyPulsing ? 1.03 : 1.0)
+                        .animation(
+                            .easeInOut(duration: 1.75).repeatForever(autoreverses: true),
+                            value: enemyPulsing
+                        )
+                        .overlay {
+                            SpriteVFXView(vfx: engine.enemyVFX, size: bossSpriteH * 0.9)
+                        }
+                        .frame(height: bossSpriteH, alignment: .bottom)   // shared ground line
+
+                    // Hearts+shield, then status directly underneath (aligned to the bar's left edge)
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack(spacing: 2) {
+                            HealthHeartsView(
+                                currentHp: engine.enemy.currentHp,
+                                maxHp: engine.enemy.maxHp,
+                                heartSize: heartSize,
+                                depleteFromLeft: true
+                            )
+
+                            ShieldView(block: engine.enemy.currentBlock, size: heartSize * 0.30)
+                        }
+
+                        if engine.enemy.vulnerableTurns > 0 {
+                            HStack(spacing: heartSize * 0.04) {
+                                ForEach(Array(0..<engine.enemy.vulnerableTurns), id: \.self) { _ in
+                                    CroppedSprite(name: "status_vulnerable", contentW: 0.234, contentH: 0.297, targetH: heartSize * 0.34)
+                                }
+                            }
+                            .padding(.top, -heartSize * 0.42)
+                        }
+                    }
+                }
+                .padding(.top, spriteTopPad)
+                .padding(.trailing, sideMargin)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
 
                 // Bottom-LEFT: Draw pile with count right above
                 VStack(spacing: 1) {
                     Text("\(engine.deck.drawPile.count)")
                         .font(.pixel(bodyFont))
                         .foregroundColor(.textMuted)
+                        .padding(.bottom, -cardH * 0.09)   // sit adjacent above the visible pile
 
                     ZStack {
                         if engine.deck.drawPile.count > 0 {
@@ -321,10 +354,10 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                 .padding(.leading, 16)
-                .padding(.bottom, -cardH * 0.08)
+                .padding(.bottom, 8)
 
-                // Bottom-RIGHT: Energy on top, End Turn below (same width)
-                VStack(spacing: 4) {
+                // Bottom-RIGHT: Energy directly above End Turn (compact)
+                VStack(alignment: .trailing, spacing: 6) {
                     HStack(spacing: 6) {
                         PixelImage(name: "hud_energy_orb", width: orbSize * 0.7, height: orbSize * 0.7)
                             .shadow(color: Color(hex: 0xA040D0).opacity(0.6), radius: 10)
@@ -333,23 +366,18 @@ struct ContentView: View {
                             .font(.pixel(orbSize * 0.45))
                             .foregroundColor(Color(hex: 0xE0C0F0))
                     }
-                    .frame(width: controlW)
 
                     Button {
                         resolveTurn()
                     } label: {
-                        Image("end_turn")
-                            .resizable()
-                            .interpolation(.none)
-                            .aspectRatio(contentMode: .fit)
-                            .frame(width: controlW)
+                        CroppedSprite(name: "end_turn", contentW: 0.67, contentH: 0.1875, targetH: orbSize * 0.55)
                     }
                     .buttonStyle(.plain)
                     .disabled(engine.isResolvingTurn)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 .padding(.trailing, 16)
-                .padding(.bottom, cardH * 0.05)
+                .padding(.bottom, 8)
 
                 // Card fan (bottom center)
                 ZStack {
@@ -378,7 +406,9 @@ struct ContentView: View {
                                 CardView(
                                     card: card,
                                     isSelected: isSelected,
-                                    isAffordable: engine.canAfford(card),
+                                    // During the enemy's turn, dim every card exactly like
+                                    // an unplayable (not enough energy) card.
+                                    isAffordable: engine.canAfford(card) && !isEnemyTurn,
                                     showTooltip: tooltipCardId == card.id,
                                     cardWidth: cardW,
                                     cardHeight: cardH
@@ -523,7 +553,8 @@ struct ContentView: View {
             // 3. Let the result sink in before the enemy acts.
             try? await Task.sleep(for: .seconds(comprehendPause))
 
-            // 4. Enemy turn notification (player's leftover cards are still on screen).
+            // 4. Enemy turn notification — dim the hand so cards read as unplayable.
+            withAnimation(.easeInOut(duration: 0.25)) { isEnemyTurn = true }
             await showBanner(.enemyTurn, hold: 0.9)
             try? await Task.sleep(for: .seconds(0.3))
 
@@ -540,12 +571,13 @@ struct ContentView: View {
                 clearVFX()
             }
 
-            if engine.gameState != .playing { engine.isResolvingTurn = false; return }
+            if engine.gameState != .playing { isEnemyTurn = false; engine.isResolvingTurn = false; return }
 
             // 6. Let the enemy's result sink in.
             try? await Task.sleep(for: .seconds(comprehendPause))
 
-            // 7. Player turn notification.
+            // 7. Player turn notification — restore the hand's brightness.
+            withAnimation(.easeInOut(duration: 0.25)) { isEnemyTurn = false }
             await showBanner(.playerTurn, hold: 0.9)
             try? await Task.sleep(for: .seconds(0.3))
 
