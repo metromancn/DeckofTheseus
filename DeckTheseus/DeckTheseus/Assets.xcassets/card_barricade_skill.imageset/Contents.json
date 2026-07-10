@@ -1,0 +1,12 @@
+{
+  "images" : [
+    {
+      "filename" : "card_barricade_skill.png",
+      "idiom" : "universal"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}

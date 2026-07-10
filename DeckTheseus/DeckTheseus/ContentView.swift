@@ -270,6 +270,11 @@ struct ContentView: View {
     @State private var gooSpitFrame = 0
     @State private var gooSpitProgress: CGFloat = 0
 
+    // Floor 3 card draft
+    @State private var draftCards: [Card] = []
+    @State private var draftDealtIds: Set<UUID> = []
+    @State private var draftRevealedIds: Set<UUID> = []
+
     var body: some View {
         GeometryReader { geo in
             let unit = min(geo.size.width, geo.size.height)
@@ -318,7 +323,9 @@ struct ContentView: View {
                 // DEV ONLY — instant-win the fight to speed up testing.
                 if engine.gameState == .playing {
                     Button {
+                        isEnemyTurn = false
                         engine.devWinCombat()
+                        if engine.gameState == .playing { dealNewHand() }
                     } label: {
                         Text("SKIP \u{25B6}")
                             .font(.pixel(titleFont * 0.9))
@@ -553,54 +560,66 @@ struct ContentView: View {
                         .zIndex(800)
                 }
 
-                // Non-combat overlays (victory / defeat / rest / act transition)
+                // Non-combat overlays
                 if engine.gameState != .playing {
                     let titleFontSize = min(unit * 0.12, 80)
                     let btnFontSize = min(unit * 0.045, 30)
 
-                    Color.black.opacity(0.78)
+                    Color.black.opacity(0.85)
                         .ignoresSafeArea()
+                        .zIndex(990)
 
-                    VStack(spacing: 20) {
-                        switch engine.gameState {
-                        case .victory:
-                            overlayTitle("VICTORY", size: titleFontSize, color: .goldBright)
-                            overlayButton("NEXT FLOOR", fontSize: btnFontSize) {
-                                isEnemyTurn = false
-                                engine.advanceToNextFloor()
-                                if engine.gameState == .playing { dealNewHand() }
+                    if engine.gameState == .drafting {
+                        draftOverlay(unit: unit, btnFontSize: btnFontSize)
+                            .zIndex(999)
+                    } else {
+                        VStack(spacing: 20) {
+                            switch engine.gameState {
+                            case .victory:
+                                overlayTitle("VICTORY", size: titleFontSize, color: .goldBright)
+                                Text("Act \(engine.currentAct) cleared!")
+                                    .font(.pixel(btnFontSize))
+                                    .foregroundColor(.textParchment)
+                                overlayButton("CONTINUE", fontSize: btnFontSize) {
+                                    engine.advanceToNextAct()
+                                }
+
+                            case .defeat:
+                                overlayTitle("DEFEAT", size: titleFontSize, color: Color(hex: 0xCC2244))
+                                overlayButton("RETRY FIGHT (DEV MODE)", fontSize: btnFontSize) {
+                                    isEnemyTurn = false
+                                    engine.restartCombat()
+                                    dealNewHand()
+                                }
+
+                            case .restSite:
+                                overlayTitle("REST SITE", size: titleFontSize * 0.75, color: .goldBright)
+                                Text("Recover your strength, or train a new technique.")
+                                    .font(.pixel(btnFontSize))
+                                    .foregroundColor(.textParchment)
+                                HStack(spacing: unit * 0.05) {
+                                    overlayButton("Rest\n(Heal 30%)", fontSize: btnFontSize) {
+                                        isEnemyTurn = false
+                                        engine.restHealAndAdvance()
+                                        if engine.gameState == .playing { dealNewHand() }
+                                    }
+                                    overlayButton("Train\n(Draft a Card)", fontSize: btnFontSize) {
+                                        engine.chooseTrainDraft()
+                                    }
+                                }
+
+                            case .actComplete:
+                                overlayTitle("ACT \(engine.currentAct)", size: titleFontSize * 0.8, color: .goldBright)
+                                Text("TO BE CONTINUED")
+                                    .font(.pixel(btnFontSize * 1.2))
+                                    .foregroundColor(.textParchment)
+
+                            case .drafting, .playing:
+                                EmptyView()
                             }
-
-                        case .defeat:
-                            overlayTitle("DEFEAT", size: titleFontSize, color: Color(hex: 0xCC2244))
-                            overlayButton("RETRY FIGHT (DEV MODE)", fontSize: btnFontSize) {
-                                isEnemyTurn = false
-                                engine.restartCombat()
-                                dealNewHand()
-                            }
-
-                        case .rest:
-                            overlayTitle("REST SITE", size: titleFontSize * 0.8, color: .goldBright)
-                            Text("Restore 30% of your max HP.")
-                                .font(.pixel(btnFontSize))
-                                .foregroundColor(.textParchment)
-                            overlayButton("HEAL", fontSize: btnFontSize) {
-                                isEnemyTurn = false
-                                engine.restHealAndAdvance()
-                                if engine.gameState == .playing { dealNewHand() }
-                            }
-
-                        case .actComplete:
-                            overlayTitle("ACT \(engine.currentAct)", size: titleFontSize * 0.8, color: .goldBright)
-                            Text("TO BE CONTINUED")
-                                .font(.pixel(btnFontSize * 1.2))
-                                .foregroundColor(.textParchment)
-
-                        case .playing:
-                            EmptyView()
                         }
+                        .zIndex(999)
                     }
-                    .zIndex(999)
                 }
             }
         }
@@ -627,6 +646,7 @@ struct ContentView: View {
         Button(action: action) {
             Text(title)
                 .font(.pixel(fontSize))
+                .multilineTextAlignment(.center)
                 .foregroundColor(.textParchment)
                 .padding(.horizontal, 32)
                 .padding(.vertical, 14)
@@ -646,12 +666,101 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
+    // MARK: - Card Draft (Floor 3)
+
+    @ViewBuilder
+    private func draftOverlay(unit: CGFloat, btnFontSize: CGFloat) -> some View {
+        let draftCardH = min(unit * 0.34, 300)
+        let draftCardW = draftCardH * 0.72
+
+        VStack(spacing: unit * 0.05) {
+            Text("Choose a Card to Add to Your Deck")
+                .font(.pixel(min(unit * 0.05, 34)))
+                .foregroundColor(.goldBright)
+                .shadow(color: Color.goldBright.opacity(0.5), radius: 10)
+
+            HStack(spacing: unit * 0.04) {
+                ForEach(draftCards) { card in
+                    let dealt = draftDealtIds.contains(card.id)
+                    let revealed = draftRevealedIds.contains(card.id)
+                    Group {
+                        if revealed {
+                            CardView(card: card, isSelected: false, isAffordable: true,
+                                     showTooltip: tooltipCardId == card.id,
+                                     cardWidth: draftCardW, cardHeight: draftCardH)
+                        } else {
+                            FaceDownCard(width: draftCardW, height: draftCardH)
+                        }
+                    }
+                    .opacity(dealt ? 1 : 0)
+                    .scaleEffect(dealt ? 1 : 0.6)
+                    .zIndex(tooltipCardId == card.id ? 10 : 0)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        guard revealed else { return }
+                        tooltipCardId = nil
+                        engine.draftCard(card)
+                        if engine.gameState == .playing { dealNewHand() }
+                    }
+                    .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            tooltipCardId = (pressing && revealed) ? card.id : nil
+                        }
+                    }, perform: {})
+                }
+            }
+
+            overlayButton("SKIP REWARD", fontSize: btnFontSize) {
+                engine.skipDraft()
+                if engine.gameState == .playing { dealNewHand() }
+            }
+        }
+        .onAppear {
+            let cards = Card.availableDraftCards
+            draftCards = cards
+            dealDraftCards(cards)
+        }
+    }
+
+    /// Flip the given draft cards in one-by-one from left to right.
+    private func dealDraftCards(_ cards: [Card]) {
+        draftDealtIds.removeAll()
+        draftRevealedIds.removeAll()
+        for (index, card) in cards.enumerated() {
+            let delay = Double(index) * 0.18
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(delay))
+                withAnimation(.easeOut(duration: 0.28)) {
+                    draftDealtIds.insert(card.id)
+                }
+                try? await Task.sleep(for: .seconds(0.28))
+                withAnimation(.easeInOut(duration: 0.08)) {
+                    draftRevealedIds.insert(card.id)
+                }
+            }
+        }
+    }
+
     // MARK: - Turn Resolution Orchestrator
 
     // Frame sequence durations (frameCount steps * 0.08s + lingering buffer).
     private let attackAnimDuration = 0.72   // 9 frames
     private let healAnimDuration = 0.8      // 10 frames
     private let comprehendPause = 0.8       // beat so the user can read the board
+
+    /// Combat won: Floors 1–2 auto-advance to the next floor; the boss shows VICTORY.
+    @MainActor
+    private func handleCombatWon() async {
+        isEnemyTurn = false
+        try? await Task.sleep(for: .seconds(0.55))
+        if engine.isBossFloor {
+            engine.isResolvingTurn = false   // gameState stays .victory → overlay shows
+        } else {
+            engine.advanceToNextFloor()      // Floor 2 combat, or Floor 3 rest site
+            engine.isResolvingTurn = false
+            if engine.gameState == .playing { dealNewHand() }
+        }
+    }
 
     private func resolveTurn(size: CGSize) {
         guard !engine.isResolvingTurn, engine.gameState == .playing else { return }
@@ -678,6 +787,11 @@ struct ContentView: View {
                 clearVFX()
             }
 
+            // Combat may have ended on the player's turn.
+            if engine.gameState == .victory {
+                await handleCombatWon()
+                return
+            }
             if engine.gameState != .playing { engine.isResolvingTurn = false; return }
 
             // 3. Let the result sink in before the enemy acts.
@@ -855,8 +969,70 @@ struct CardView: View {
                 .interpolation(.none)
                 .aspectRatio(contentMode: .fill)
         } else {
-            Color(hex: 0x18122A)
+            fallbackCard
         }
+    }
+
+    // Text-based card face for cards without pixel art (draft cards).
+    private var fallbackCard: some View {
+        let attack = card.type == .attack
+        return VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 4) {
+                Text(card.name)
+                    .font(.pixel(cardWidth * 0.15))
+                    .foregroundColor(.textParchment)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+
+                Spacer(minLength: 0)
+
+                ZStack {
+                    Circle()
+                        .fill(Color(hex: 0x8A3FD0))
+                        .frame(width: cardWidth * 0.22, height: cardWidth * 0.22)
+                    Text("\(card.energyCost)")
+                        .font(.pixel(cardWidth * 0.15))
+                        .foregroundColor(.white)
+                }
+            }
+            .padding(.horizontal, cardWidth * 0.08)
+            .padding(.top, cardWidth * 0.06)
+
+            Rectangle()
+                .fill(Color.goldBorder.opacity(0.5))
+                .frame(height: 1)
+                .padding(.horizontal, cardWidth * 0.08)
+                .padding(.vertical, cardHeight * 0.03)
+
+            Spacer(minLength: 0)
+
+            Text(card.description)
+                .font(.pixel(cardWidth * 0.125))
+                .foregroundColor(Color(hex: 0xC8BCA0))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, cardWidth * 0.09)
+
+            Spacer(minLength: 0)
+
+            Text(card.type.rawValue.uppercased())
+                .font(.pixel(cardWidth * 0.09))
+                .foregroundColor(.textMuted)
+                .padding(.bottom, cardHeight * 0.05)
+        }
+        .frame(width: cardWidth, height: cardHeight)
+        .background(
+            LinearGradient(
+                colors: attack
+                    ? [Color(hex: 0x3A1520), Color(hex: 0x240E14)]
+                    : [Color(hex: 0x172A3C), Color(hex: 0x0E1A28)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(Color.goldBorder, lineWidth: 1.5)
+        )
     }
 }
 

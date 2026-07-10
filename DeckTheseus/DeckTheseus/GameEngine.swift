@@ -16,7 +16,8 @@ enum GameState {
     case playing
     case victory
     case defeat
-    case rest          // non-combat rest site (Floor 3)
+    case restSite      // Floor 3 — choose Heal or Draft
+    case drafting      // Floor 3 — pick a card to add to the deck
     case actComplete   // "To Be Continued" placeholder between acts
 }
 
@@ -53,9 +54,13 @@ struct Card: Identifiable {
     let vulnerableApply: Int
     let imageName: String?
     let isExhaustible: Bool
+    let hitsAllEnemies: Bool     // AOE damage (Cleave)
+    let energyNextTurn: Int      // extra energy next turn (Thunder)
+    let blockNextTurn: Int       // extra block next turn (Barricade)
 
     init(name: String, type: CardType, energyCost: Int, damage: Int, block: Int, imageName: String?,
-         vulnerableApply: Int = 0, isExhaustible: Bool = false) {
+         vulnerableApply: Int = 0, isExhaustible: Bool = false,
+         hitsAllEnemies: Bool = false, energyNextTurn: Int = 0, blockNextTurn: Int = 0) {
         self.name = name
         self.type = type
         self.energyCost = energyCost
@@ -64,6 +69,9 @@ struct Card: Identifiable {
         self.imageName = imageName
         self.vulnerableApply = vulnerableApply
         self.isExhaustible = isExhaustible
+        self.hitsAllEnemies = hitsAllEnemies
+        self.energyNextTurn = energyNextTurn
+        self.blockNextTurn = blockNextTurn
     }
 
     var description: String {
@@ -71,9 +79,13 @@ struct Card: Identifiable {
             return "Unplayable. Costs \(energyCost) energy to remove from your deck for this combat."
         }
         var parts: [String] = []
-        if damage > 0 { parts.append("Deal \(damage) damage.") }
+        if damage > 0 {
+            parts.append(hitsAllEnemies ? "Deal \(damage) damage to ALL enemies." : "Deal \(damage) damage.")
+        }
         if vulnerableApply > 0 { parts.append("Apply \(vulnerableApply) Vulnerable.") }
         if block > 0 { parts.append("Gain \(block) block.") }
+        if energyNextTurn > 0 { parts.append("Gain \(energyNextTurn) energy next turn.") }
+        if blockNextTurn > 0 { parts.append("Gain \(blockNextTurn) block next turn.") }
         if isExhaustible { parts.append("Exhaust.") }
         return parts.joined(separator: " ")
     }
@@ -81,6 +93,18 @@ struct Card: Identifiable {
     static func slime() -> Card {
         Card(name: "Slime", type: .status, energyCost: 1, damage: 0, block: 0,
              imageName: "card_slimed_status", isExhaustible: true)
+    }
+
+    /// The three cards offered at the Floor 3 draft.
+    static var availableDraftCards: [Card] {
+        [
+            Card(name: "Cleave", type: .attack, energyCost: 2, damage: 8, block: 0,
+                 imageName: "card_cleave_attack", hitsAllEnemies: true),
+            Card(name: "Thunder", type: .attack, energyCost: 2, damage: 15, block: 0,
+                 imageName: "card_thunder_attack", energyNextTurn: 1),
+            Card(name: "Barricade", type: .skill, energyCost: 1, damage: 0, block: 8,
+                 imageName: "card_barricade_skill", blockNextTurn: 2),
+        ]
     }
 }
 
@@ -265,6 +289,10 @@ class GameEngine {
     var currentAct = 1
     var currentFloor = 1
 
+    // Next-turn buffs (applied at the start of the player's turn)
+    var extraEnergyNextTurn: Int = 0
+    var extraBlockNextTurn: Int = 0
+
     // Turn-flow + VFX presentation state (driven by the view's orchestrator)
     var turnBanner: TurnBanner = .none
     var playerVFX: SpriteVFX = .none
@@ -336,9 +364,9 @@ class GameEngine {
     // MARK: - Combat Resolution
 
     private func checkCombatResolution() {
-        // Victory only once every enemy is at 0 HP.
+        // A combat is "won" once every enemy is at 0 HP. The floor logic (auto-
+        // advance vs. terminal victory) is decided by the turn orchestrator.
         if allEnemiesDead {
-            player.currentHp = player.maxHp
             gameState = .victory
         } else if player.currentHp <= 0 {
             player.currentHp = 0
@@ -351,26 +379,41 @@ class GameEngine {
         1.0 + 0.5 * Double(max(0, stacks))
     }
 
+    /// Deal a card's damage to one enemy (vulnerable applied, block absorbed, HP clamped).
+    private func dealDamage(_ base: Int, to enemy: Enemy) {
+        let raw = Int(floor(Double(base) * vulnerableMultiplier(enemy.vulnerableTurns)))
+        let absorbed = min(raw, enemy.currentBlock)
+        enemy.currentBlock -= absorbed
+        enemy.currentHp = max(0, enemy.currentHp - (raw - absorbed))
+    }
+
     // MARK: - Play Cards
 
     func playSelectedCards() {
         guard gameState == .playing else { return }
         let selected = deck.hand.filter { selectedCardIds.contains($0.id) }
         for card in selected {
-            // Single-target effects hit whichever enemy is currently selected.
-            if let target = currentTarget, target.isAlive {
-                if card.damage > 0 {
-                    let mult = vulnerableMultiplier(target.vulnerableTurns)
-                    let raw = Int(floor(Double(card.damage) * mult))
-                    let afterBlock = applyDamage(raw, to: target)
-                    target.currentHp = max(0, target.currentHp - afterBlock)
+            if card.damage > 0 {
+                if card.hitsAllEnemies {
+                    // AOE — ignore targetIndex, hit every living enemy.
+                    for enemy in enemies where enemy.isAlive {
+                        dealDamage(card.damage, to: enemy)
+                    }
+                } else if let target = currentTarget, target.isAlive {
+                    dealDamage(card.damage, to: target)
                 }
-                if card.vulnerableApply > 0 {
-                    target.vulnerableTurns += card.vulnerableApply
-                }
+            }
+            if let target = currentTarget, target.isAlive, card.vulnerableApply > 0 {
+                target.vulnerableTurns += card.vulnerableApply
             }
             if card.block > 0 {
                 player.currentBlock += card.block
+            }
+            if card.energyNextTurn > 0 {
+                extraEnergyNextTurn += card.energyNextTurn
+            }
+            if card.blockNextTurn > 0 {
+                extraBlockNextTurn += card.blockNextTurn
             }
 
             retargetIfNeeded()
@@ -388,13 +431,6 @@ class GameEngine {
             }
         }
         selectedCardIds.removeAll()
-    }
-
-    /// Apply `raw` damage to one enemy's block first, return the overflow to HP.
-    private func applyDamage(_ raw: Int, to enemy: Enemy) -> Int {
-        let absorbed = min(raw, enemy.currentBlock)
-        enemy.currentBlock -= absorbed
-        return raw - absorbed
     }
 
     // MARK: - Enemy Turn
@@ -468,10 +504,15 @@ class GameEngine {
         executeEnemyTurn()
     }
 
-    /// Refresh energy, advance the turn counter/intent, and draw a new hand.
+    /// Refresh energy, apply next-turn buffs, advance the intents, and draw.
     func beginNextTurn() {
         guard gameState == .playing else { return }
-        player.currentEnergy = player.maxEnergy
+        // Start-of-turn buffs.
+        player.currentBlock += extraBlockNextTurn
+        player.currentEnergy = player.maxEnergy + extraEnergyNextTurn
+        extraEnergyNextTurn = 0
+        extraBlockNextTurn = 0
+
         currentTurn += 1
         for enemy in enemies { enemy.advanceIntent(forTurn: currentTurn) }
         deck.drawCards(5)
@@ -528,6 +569,8 @@ class GameEngine {
         }
     }
 
+    var isBossFloor: Bool { nodeForFloor(currentFloor) == .boss }
+
     private func spawnEnemies(for node: FloorNode) -> [Enemy] {
         switch node {
         case .combat: return [.basicOoze()]
@@ -548,6 +591,8 @@ class GameEngine {
 
         player.currentBlock = 0
         player.currentEnergy = player.maxEnergy
+        extraEnergyNextTurn = 0
+        extraBlockNextTurn = 0
 
         deck.startCombat()   // reshuffle masterDeck into drawPile, clear temp piles
         deck.drawCards(5)
@@ -560,45 +605,68 @@ class GameEngine {
         gameState = .playing
     }
 
-    /// Load whatever node the current floor points at (combat or rest).
+    /// Load whatever node the current floor points at (combat or rest site).
     private func loadCurrentFloor() {
         switch nodeForFloor(currentFloor) {
         case .rest:
-            gameState = .rest
+            gameState = .restSite
         default:
             startFloorCombat()
         }
     }
 
-    /// Victory "Next Floor" button — advance to the next node, or the next act.
+    /// Advance one floor and load its node (combat or rest site).
     func advanceToNextFloor() {
-        if currentFloor >= 4 {
-            // Beat the Act boss → move to the next act (placeholder for now).
-            currentAct += 1
-            currentFloor = 1
-            gameState = .actComplete
-            return
-        }
         currentFloor += 1
         loadCurrentFloor()
     }
 
-    /// Rest-site "Heal" button — restore 30% max HP, then advance to the next floor.
+    /// Terminal boss victory → move on to the next act (placeholder for now).
+    func advanceToNextAct() {
+        currentAct += 1
+        currentFloor = 1
+        gameState = .actComplete
+    }
+
+    // MARK: - Rest Site (Floor 3)
+
+    /// "Rest" — heal 30% of max HP (clamped), then head to Floor 4.
     func restHealAndAdvance() {
         let healAmount = Int(Double(player.maxHp) * 0.30)
         player.currentHp = min(player.maxHp, player.currentHp + healAmount)
-        currentFloor += 1
-        loadCurrentFloor()
+        advanceToNextFloor()
     }
 
-    /// DEV ONLY — instantly win the current encounter to fast-forward testing.
+    /// "Train" — open the card draft.
+    func chooseTrainDraft() {
+        gameState = .drafting
+    }
+
+    /// Draft — add exactly one copy of `card` to the master deck, then Floor 4.
+    /// Guarded so a double-fired tap can't add the card twice.
+    func draftCard(_ card: Card) {
+        guard gameState == .drafting else { return }
+        deck.masterDeck.append(card)
+        advanceToNextFloor()
+    }
+
+    /// Draft — skip the reward and head to Floor 4.
+    func skipDraft() {
+        guard gameState == .drafting else { return }
+        advanceToNextFloor()
+    }
+
+    /// DEV ONLY — instantly clear the current encounter to fast-forward testing.
     func devWinCombat() {
         for enemy in enemies { enemy.currentHp = 0; enemy.vfx = .none }
-        player.currentHp = player.maxHp
         turnBanner = .none
         playerVFX = .none
         isResolvingTurn = false
-        gameState = .victory
+        if isBossFloor {
+            gameState = .victory
+        } else {
+            advanceToNextFloor()
+        }
     }
 
     // MARK: - Restart (dev-mode retry of the exact current fight)
