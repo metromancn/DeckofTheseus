@@ -215,9 +215,9 @@ class Enemy: Identifiable {
               rotation: [.tackle(baseDamage: 9), .defend(block: 6), .tackle(baseDamage: 6)])
     }
 
-    /// Floor 4 — the Act boss. Rotation/logic unchanged from before.
+    /// Floor 4 — the Act boss.
     static func slimeKing() -> Enemy {
-        Enemy(name: "Slime King", maxHp: 140, spriteName: "boss_slime",
+        Enemy(name: "Slime King", maxHp: 160, spriteName: "boss_slime",
               spriteContentW: 0.61, spriteContentH: 0.578,
               rotation: [.tackle(baseDamage: 12), .gooSpit(slimeCount: 2), .harden(block: 15, strengthGain: 2)])
     }
@@ -453,6 +453,8 @@ class GameEngine {
                     slimeCards.append(.slime())
                 }
                 deck.injectIntoDiscard(slimeCards)
+                // Energy-drain debuff — reduces next turn's energy (can go negative).
+                extraEnergyNextTurn -= 1
 
             case .harden(let block, let strengthGain):
                 enemy.currentBlock += block
@@ -507,9 +509,9 @@ class GameEngine {
     /// Refresh energy, apply next-turn buffs, advance the intents, and draw.
     func beginNextTurn() {
         guard gameState == .playing else { return }
-        // Start-of-turn buffs.
+        // Start-of-turn buffs/debuffs (energy clamped so it never goes below 0).
         player.currentBlock += extraBlockNextTurn
-        player.currentEnergy = player.maxEnergy + extraEnergyNextTurn
+        player.currentEnergy = max(0, player.maxEnergy + extraEnergyNextTurn)
         extraEnergyNextTurn = 0
         extraBlockNextTurn = 0
 
