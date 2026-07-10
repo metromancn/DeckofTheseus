@@ -78,7 +78,7 @@ struct HealthHeartsView: View {
 
     private let hpPerHeart = 20
 
-    private var heartCount: Int { maxHp / hpPerHeart }
+    private var heartCount: Int { max(1, (maxHp + hpPerHeart - 1) / hpPerHeart) }
 
     private func heartImage(at index: Int) -> String {
         // Which "logical" slot this display position maps to. When depleting
@@ -145,6 +145,67 @@ struct FaceDownCard: View {
     }
 }
 
+// MARK: - Enemy View (one enemy: name, sprite, hearts, shield, status, target reticle)
+
+struct EnemyView: View {
+    let enemy: Enemy
+    let isTarget: Bool
+    let spriteH: CGFloat      // visible sprite height
+    let groundH: CGFloat      // shared ground-zone height (aligns with the player)
+    let heartSize: CGFloat
+    let nameFont: CGFloat
+    let statGap: CGFloat
+    let pulsing: Bool
+
+    var body: some View {
+        VStack(spacing: statGap) {
+            Text(enemy.name)
+                .font(.pixel(nameFont))
+                .foregroundColor(isTarget ? .goldBright : .textParchment)
+                .frame(height: nameFont * 1.3, alignment: .center)
+                .padding(.bottom, statGap)
+
+            ZStack(alignment: .top) {
+                CroppedSprite(name: enemy.spriteName,
+                              contentW: enemy.spriteContentW,
+                              contentH: enemy.spriteContentH,
+                              targetH: spriteH)
+                    .shadow(color: Color(hex: 0x32B45A).opacity(0.4), radius: 16)
+                    .scaleEffect(pulsing ? 1.03 : 1.0)
+                    .animation(.easeInOut(duration: 1.75).repeatForever(autoreverses: true), value: pulsing)
+                    .overlay { SpriteVFXView(vfx: enemy.vfx, size: spriteH * 0.9) }
+                    .opacity(enemy.isAlive ? 1.0 : 0.25)
+                    .frame(height: groundH, alignment: .bottom)
+
+                // Target reticle above the sprite.
+                if isTarget {
+                    Text("\u{25BC}")
+                        .font(.system(size: heartSize * 0.55))
+                        .foregroundColor(.goldBright)
+                        .shadow(color: Color.goldBright.opacity(0.8), radius: 6)
+                        .offset(y: -heartSize * 0.35)
+                }
+            }
+
+            VStack(spacing: 0) {
+                HStack(spacing: 2) {
+                    HealthHeartsView(currentHp: enemy.currentHp, maxHp: enemy.maxHp, heartSize: heartSize)
+                    ShieldView(block: enemy.currentBlock, size: heartSize * 0.30)
+                }
+
+                if enemy.vulnerableTurns > 0 {
+                    HStack(spacing: heartSize * 0.04) {
+                        ForEach(Array(0..<enemy.vulnerableTurns), id: \.self) { _ in
+                            CroppedSprite(name: "status_vulnerable", contentW: 0.234, contentH: 0.297, targetH: heartSize * 0.34)
+                        }
+                    }
+                    .padding(.top, -heartSize * 0.42)
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Combat VFX Overlay
 
 struct SpriteVFXView: View {
@@ -204,6 +265,11 @@ struct ContentView: View {
     @State private var revealedCardIds: Set<UUID> = []
     @State private var isEnemyTurn = false
 
+    // Goo-spit projectile (boss → player)
+    @State private var gooSpitActive = false
+    @State private var gooSpitFrame = 0
+    @State private var gooSpitProgress: CGFloat = 0
+
     var body: some View {
         GeometryReader { geo in
             let unit = min(geo.size.width, geo.size.height)
@@ -233,9 +299,9 @@ struct ContentView: View {
                     .frame(width: geo.size.width, height: geo.size.height)
                     .clipped()
 
-                // Top-left: Floor-Act + Turn
+                // Top bar: Floor-Act + Turn (left), dev SKIP (right)
                 HStack(spacing: 12) {
-                    Text("1-4")
+                    Text("\(engine.currentAct)-\(engine.currentFloor)")
                         .font(.pixel(titleFont * 1.2))
                         .foregroundColor(.textParchment)
 
@@ -248,6 +314,31 @@ struct ContentView: View {
                 .padding(.horizontal, 20)
                 .padding(.top, 12)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+                // DEV ONLY — instant-win the fight to speed up testing.
+                if engine.gameState == .playing {
+                    Button {
+                        engine.devWinCombat()
+                    } label: {
+                        Text("SKIP \u{25B6}")
+                            .font(.pixel(titleFont * 0.9))
+                            .foregroundColor(Color(hex: 0xE0C0F0))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(Color(hex: 0x2A1E3A).opacity(0.85))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(Color(hex: 0x6A4A8A), lineWidth: 1.5)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 20)
+                    .padding(.top, geo.size.height * 0.12)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                }
 
                 // Player (LEFT) — compact: name, sprite, hearts+shield all adjacent, left-aligned
                 VStack(alignment: .leading, spacing: statGap) {
@@ -283,46 +374,26 @@ struct ContentView: View {
                 .padding(.leading, sideMargin)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-                // Boss (RIGHT) — compact, right-aligned; hearts deplete from the left; status under hearts
-                VStack(alignment: .trailing, spacing: statGap) {
-                    Text("Slime King")
-                        .font(.pixel(nameFont))
-                        .foregroundColor(.textParchment)
-                        .frame(width: bossSpriteH * 1.055, height: nameFont * 1.3, alignment: .trailing)
-                        .padding(.bottom, statGap)
-
-                    CroppedSprite(name: "boss_slime", contentW: 0.61, contentH: 0.578, targetH: bossSpriteH)
-                        .shadow(color: Color(hex: 0x32B45A).opacity(0.4), radius: 20)
-                        .scaleEffect(enemyPulsing ? 1.03 : 1.0)
-                        .animation(
-                            .easeInOut(duration: 1.75).repeatForever(autoreverses: true),
-                            value: enemyPulsing
+                // Enemies (RIGHT) — one or more; tap a sprite to target it
+                let enemySpriteH = engine.enemies.count > 1 ? bossSpriteH * 0.78 : bossSpriteH
+                HStack(alignment: .top, spacing: sideMargin * 0.5) {
+                    ForEach(Array(engine.enemies.enumerated()), id: \.element.id) { index, enemy in
+                        EnemyView(
+                            enemy: enemy,
+                            isTarget: index == engine.targetIndex,
+                            spriteH: enemySpriteH,
+                            groundH: bossSpriteH,
+                            heartSize: heartSize,
+                            nameFont: nameFont,
+                            statGap: statGap,
+                            pulsing: enemyPulsing
                         )
-                        .overlay {
-                            SpriteVFXView(vfx: engine.enemyVFX, size: bossSpriteH * 0.9)
-                        }
-                        .frame(height: bossSpriteH, alignment: .bottom)   // shared ground line
-
-                    // Hearts+shield, then status directly underneath (aligned to the bar's left edge)
-                    VStack(alignment: .leading, spacing: 0) {
-                        HStack(spacing: 2) {
-                            HealthHeartsView(
-                                currentHp: engine.enemy.currentHp,
-                                maxHp: engine.enemy.maxHp,
-                                heartSize: heartSize,
-                                depleteFromLeft: true
-                            )
-
-                            ShieldView(block: engine.enemy.currentBlock, size: heartSize * 0.30)
-                        }
-
-                        if engine.enemy.vulnerableTurns > 0 {
-                            HStack(spacing: heartSize * 0.04) {
-                                ForEach(Array(0..<engine.enemy.vulnerableTurns), id: \.self) { _ in
-                                    CroppedSprite(name: "status_vulnerable", contentW: 0.234, contentH: 0.297, targetH: heartSize * 0.34)
-                                }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            guard enemy.isAlive, !engine.isResolvingTurn else { return }
+                            withAnimation(.easeOut(duration: 0.15)) {
+                                engine.targetIndex = index
                             }
-                            .padding(.top, -heartSize * 0.42)
                         }
                     }
                 }
@@ -368,7 +439,7 @@ struct ContentView: View {
                     }
 
                     Button {
-                        resolveTurn()
+                        resolveTurn(size: geo.size)
                     } label: {
                         CroppedSprite(name: "end_turn", contentW: 0.67, contentH: 0.1875, targetH: orbSize * 0.55)
                     }
@@ -443,6 +514,24 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 .offset(y: cardH * 0.12)
 
+                // Goo-spit projectile flying in a straight, level line boss → player
+                if gooSpitActive {
+                    let lineY = geo.size.height * 0.38
+                    let start = CGPoint(x: geo.size.width * 0.78, y: lineY)
+                    let end = CGPoint(x: geo.size.width * 0.18, y: lineY)
+                    let pos = CGPoint(
+                        x: start.x + (end.x - start.x) * gooSpitProgress,
+                        y: lineY
+                    )
+                    Image(String(format: "goo_spit_animation_%04d", gooSpitFrame + 1))
+                        .resizable()
+                        .interpolation(.none)
+                        .frame(width: heartSize * 1.4, height: heartSize * 1.4)
+                        .position(pos)
+                        .allowsHitTesting(false)
+                        .zIndex(750)
+                }
+
                 // Turn-state notifier banner
                 if engine.turnBanner != .none {
                     let isPlayer = engine.turnBanner == .playerTurn
@@ -464,45 +553,52 @@ struct ContentView: View {
                         .zIndex(800)
                 }
 
-                // Win/Loss overlay
+                // Non-combat overlays (victory / defeat / rest / act transition)
                 if engine.gameState != .playing {
-                    Color.black.opacity(0.75)
+                    let titleFontSize = min(unit * 0.12, 80)
+                    let btnFontSize = min(unit * 0.045, 30)
+
+                    Color.black.opacity(0.78)
                         .ignoresSafeArea()
 
                     VStack(spacing: 20) {
-                        Text(engine.gameState == .victory ? "VICTORY" : "DEFEAT")
-                            .font(.pixel(min(unit * 0.12, 80)))
-                            .foregroundColor(engine.gameState == .victory ? .goldBright : Color(hex: 0xCC2244))
-                            .shadow(
-                                color: engine.gameState == .victory
-                                    ? Color.goldBright.opacity(0.6)
-                                    : Color(hex: 0xCC2244).opacity(0.6),
-                                radius: 16
-                            )
+                        switch engine.gameState {
+                        case .victory:
+                            overlayTitle("VICTORY", size: titleFontSize, color: .goldBright)
+                            overlayButton("NEXT FLOOR", fontSize: btnFontSize) {
+                                isEnemyTurn = false
+                                engine.advanceToNextFloor()
+                                if engine.gameState == .playing { dealNewHand() }
+                            }
 
-                        Button {
-                            engine.restartCombat()
-                            dealNewHand()
-                        } label: {
-                            Text("RESTART")
-                                .font(.pixel(min(unit * 0.05, 32)))
+                        case .defeat:
+                            overlayTitle("DEFEAT", size: titleFontSize, color: Color(hex: 0xCC2244))
+                            overlayButton("RETRY FIGHT (DEV MODE)", fontSize: btnFontSize) {
+                                isEnemyTurn = false
+                                engine.restartCombat()
+                                dealNewHand()
+                            }
+
+                        case .rest:
+                            overlayTitle("REST SITE", size: titleFontSize * 0.8, color: .goldBright)
+                            Text("Restore 30% of your max HP.")
+                                .font(.pixel(btnFontSize))
                                 .foregroundColor(.textParchment)
-                                .padding(.horizontal, 32)
-                                .padding(.vertical, 14)
-                                .background(
-                                    LinearGradient(
-                                        colors: [Color(hex: 0x2A1E3A), Color(hex: 0x1A1228)],
-                                        startPoint: .top,
-                                        endPoint: .bottom
-                                    )
-                                )
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .stroke(Color.goldBorder, lineWidth: 2)
-                                )
+                            overlayButton("HEAL", fontSize: btnFontSize) {
+                                isEnemyTurn = false
+                                engine.restHealAndAdvance()
+                                if engine.gameState == .playing { dealNewHand() }
+                            }
+
+                        case .actComplete:
+                            overlayTitle("ACT \(engine.currentAct)", size: titleFontSize * 0.8, color: .goldBright)
+                            Text("TO BE CONTINUED")
+                                .font(.pixel(btnFontSize * 1.2))
+                                .foregroundColor(.textParchment)
+
+                        case .playing:
+                            EmptyView()
                         }
-                        .buttonStyle(.plain)
                     }
                     .zIndex(999)
                 }
@@ -517,6 +613,39 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Overlay Helpers
+
+    private func overlayTitle(_ text: String, size: CGFloat, color: Color) -> some View {
+        Text(text)
+            .font(.pixel(size))
+            .foregroundColor(color)
+            .shadow(color: color.opacity(0.6), radius: 16)
+    }
+
+    @ViewBuilder
+    private func overlayButton(_ title: String, fontSize: CGFloat, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.pixel(fontSize))
+                .foregroundColor(.textParchment)
+                .padding(.horizontal, 32)
+                .padding(.vertical, 14)
+                .background(
+                    LinearGradient(
+                        colors: [Color(hex: 0x2A1E3A), Color(hex: 0x1A1228)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.goldBorder, lineWidth: 2)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
     // MARK: - Turn Resolution Orchestrator
 
     // Frame sequence durations (frameCount steps * 0.08s + lingering buffer).
@@ -524,7 +653,7 @@ struct ContentView: View {
     private let healAnimDuration = 0.8      // 10 frames
     private let comprehendPause = 0.8       // beat so the user can read the board
 
-    private func resolveTurn() {
+    private func resolveTurn(size: CGSize) {
         guard !engine.isResolvingTurn, engine.gameState == .playing else { return }
         engine.isResolvingTurn = true
         tooltipCardId = nil
@@ -538,9 +667,10 @@ struct ContentView: View {
             try? await Task.sleep(for: .seconds(0.35))
 
             // 2. Resolve the player's cards, then play their animation.
+            let attackTargetIndex = engine.targetIndex   // enemy that gets hit
             engine.playSelectedCards()
-            if playerWillAttack { triggerVFX(.attack, on: \.enemyVFX) }
-            if playerWillShield { triggerVFX(.healDebuff, on: \.playerVFX) }
+            if playerWillAttack { setEnemyVFX(.attack, at: attackTargetIndex) }
+            if playerWillShield { setPlayerVFX(.healDebuff) }
             let playerAnim = max(playerWillAttack ? attackAnimDuration : 0,
                                  playerWillShield ? healAnimDuration : 0)
             if playerAnim > 0 {
@@ -558,17 +688,22 @@ struct ContentView: View {
             await showBanner(.enemyTurn, hold: 0.9)
             try? await Task.sleep(for: .seconds(0.3))
 
-            // 5. Resolve the enemy's queued move, then play its animation.
-            let enemyWillAttack = engine.enemyIntentAttacks
-            let enemyWillBuffSelf = engine.enemyIntentBuffsSelf
+            // 5. Resolve the enemies' queued moves, then play their animations.
+            let enemyWillAttack = engine.anyEnemyAttacks
+            let buffingIndices = engine.buffingEnemyIndices
+            let enemyGooSpits = engine.anyEnemyGooSpits
             engine.runEnemyTurn()
-            if enemyWillAttack { triggerVFX(.attack, on: \.playerVFX) }
-            if enemyWillBuffSelf { triggerVFX(.healDebuff, on: \.enemyVFX) }
+            if enemyWillAttack { setPlayerVFX(.attack) }
+            for idx in buffingIndices { setEnemyVFX(.healDebuff, at: idx) }
             let enemyAnim = max(enemyWillAttack ? attackAnimDuration : 0,
-                                enemyWillBuffSelf ? healAnimDuration : 0)
+                                buffingIndices.isEmpty ? 0 : healAnimDuration)
             if enemyAnim > 0 {
                 try? await Task.sleep(for: .seconds(enemyAnim))
                 clearVFX()
+            }
+            // Goo-spit projectile flies from the boss to the player.
+            if enemyGooSpits {
+                await playGooSpit(size: size)
             }
 
             if engine.gameState != .playing { isEnemyTurn = false; engine.isResolvingTurn = false; return }
@@ -598,9 +733,17 @@ struct ContentView: View {
     }
 
     @MainActor
-    private func triggerVFX(_ vfx: SpriteVFX, on keyPath: ReferenceWritableKeyPath<GameEngine, SpriteVFX>) {
+    private func setPlayerVFX(_ vfx: SpriteVFX) {
         withAnimation(.easeOut(duration: 0.15)) {
-            engine[keyPath: keyPath] = vfx
+            engine.playerVFX = vfx
+        }
+    }
+
+    @MainActor
+    private func setEnemyVFX(_ vfx: SpriteVFX, at index: Int) {
+        guard engine.enemies.indices.contains(index) else { return }
+        withAnimation(.easeOut(duration: 0.15)) {
+            engine.enemies[index].vfx = vfx
         }
     }
 
@@ -608,8 +751,28 @@ struct ContentView: View {
     private func clearVFX() {
         withAnimation(.easeOut(duration: 0.2)) {
             engine.playerVFX = .none
-            engine.enemyVFX = .none
+            for enemy in engine.enemies { enemy.vfx = .none }
         }
+    }
+
+    /// Fly the goo-spit projectile from the boss toward the player, cycling frames.
+    @MainActor
+    private func playGooSpit(size: CGSize) async {
+        gooSpitFrame = 0
+        gooSpitProgress = 0
+        gooSpitActive = true
+
+        // Travel across the screen at constant speed (straight line)…
+        withAnimation(.linear(duration: 0.72)) { gooSpitProgress = 1.0 }
+        // …while stepping through the 8 sprite frames.
+        for i in 0..<8 {
+            gooSpitFrame = i
+            try? await Task.sleep(for: .seconds(0.09))
+        }
+
+        gooSpitActive = false
+        gooSpitProgress = 0
+        gooSpitFrame = 0
     }
 
     // MARK: - Deal Animation

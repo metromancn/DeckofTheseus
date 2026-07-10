@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import CoreGraphics
 
 // MARK: - Card Types
 
@@ -15,6 +16,17 @@ enum GameState {
     case playing
     case victory
     case defeat
+    case rest          // non-combat rest site (Floor 3)
+    case actComplete   // "To Be Continued" placeholder between acts
+}
+
+// MARK: - Floor Nodes
+
+enum FloorNode {
+    case combat   // standard enemy
+    case elite    // harder enemy
+    case rest     // rest site
+    case boss     // boss encounter
 }
 
 // MARK: - Turn / VFX State
@@ -78,12 +90,14 @@ enum EnemyIntent {
     case tackle(baseDamage: Int)
     case gooSpit(slimeCount: Int)
     case harden(block: Int, strengthGain: Int)
+    case defend(block: Int)
 
     var displayName: String {
         switch self {
         case .tackle: return "Tackle"
         case .gooSpit: return "Goo Spit"
         case .harden: return "Harden"
+        case .defend: return "Defend"
         }
     }
 
@@ -92,6 +106,7 @@ enum EnemyIntent {
         case .tackle(let base): return "\(base + strength)"
         case .gooSpit(let count): return "×\(count)"
         case .harden(let blk, _): return "\(blk)"
+        case .defend(let blk): return "\(blk)"
         }
     }
 }
@@ -111,34 +126,76 @@ class Player {
 // MARK: - Enemy
 
 @Observable
-class Enemy {
-    var name = "Slime King"
-    var maxHp = 140
-    var currentHp = 140
+class Enemy: Identifiable {
+    let id = UUID()
+    var name: String
+    var maxHp: Int
+    var currentHp: Int
     var currentBlock = 0
     var strength = 0
     var vulnerableTurns = 0
-    var nextMove: EnemyIntent = .tackle(baseDamage: 12)
+    var vfx: SpriteVFX = .none
+
+    // Sprite art + crop bounds (fraction of the 64px canvas).
+    var spriteName: String
+    var spriteContentW: CGFloat
+    var spriteContentH: CGFloat
+
+    // Repeating list of moves; advanceIntent walks through it by turn number.
+    var rotation: [EnemyIntent]
+    var nextMove: EnemyIntent
+
+    init(name: String, maxHp: Int, spriteName: String,
+         spriteContentW: CGFloat, spriteContentH: CGFloat, rotation: [EnemyIntent]) {
+        self.name = name
+        self.maxHp = maxHp
+        self.currentHp = maxHp
+        self.spriteName = spriteName
+        self.spriteContentW = spriteContentW
+        self.spriteContentH = spriteContentH
+        self.rotation = rotation
+        self.nextMove = rotation.first ?? .tackle(baseDamage: 0)
+    }
+
+    var isAlive: Bool { currentHp > 0 }
 
     func clearDebuffs() {
         vulnerableTurns = 0
     }
 
     func advanceIntent(forTurn turn: Int) {
-        switch (turn - 1) % 3 {
-        case 0: nextMove = .tackle(baseDamage: 12)
-        case 1: nextMove = .gooSpit(slimeCount: 2)
-        case 2: nextMove = .harden(block: 15, strengthGain: 2)
-        default: break
-        }
+        guard !rotation.isEmpty else { return }
+        nextMove = rotation[(turn - 1) % rotation.count]
     }
 
-    func reset() {
-        currentHp = maxHp
-        currentBlock = 0
-        strength = 0
-        vulnerableTurns = 0
-        nextMove = .tackle(baseDamage: 12)
+    // MARK: - Enemy factories
+
+    /// Floor 1 — standard slime.
+    static func basicOoze() -> Enemy {
+        Enemy(name: "Ooze", maxHp: 40, spriteName: "enemy_slime_basic",
+              spriteContentW: 0.453, spriteContentH: 0.375,
+              rotation: [.tackle(baseDamage: 6), .defend(block: 5)])
+    }
+
+    /// Floor 2 — first enemy.
+    static func acidSlime() -> Enemy {
+        Enemy(name: "Acid Slime", maxHp: 60, spriteName: "enemy_slime_basic",
+              spriteContentW: 0.453, spriteContentH: 0.375,
+              rotation: [.tackle(baseDamage: 10), .defend(block: 10), .tackle(baseDamage: 8)])
+    }
+
+    /// Floor 2 — second enemy.
+    static func basicSlime() -> Enemy {
+        Enemy(name: "Basic Slime", maxHp: 40, spriteName: "enemy_slime_basic",
+              spriteContentW: 0.453, spriteContentH: 0.375,
+              rotation: [.tackle(baseDamage: 9), .defend(block: 6), .tackle(baseDamage: 6)])
+    }
+
+    /// Floor 4 — the Act boss. Rotation/logic unchanged from before.
+    static func slimeKing() -> Enemy {
+        Enemy(name: "Slime King", maxHp: 140, spriteName: "boss_slime",
+              spriteContentW: 0.61, spriteContentH: 0.578,
+              rotation: [.tackle(baseDamage: 12), .gooSpit(slimeCount: 2), .harden(block: 15, strengthGain: 2)])
     }
 }
 
@@ -197,17 +254,41 @@ class DeckManager {
 @Observable
 class GameEngine {
     var player = Player()
-    var enemy = Enemy()
+    var enemies: [Enemy] = []
+    var targetIndex: Int = 0
     var deck = DeckManager()
     var selectedCardIds: Set<UUID> = []
     var currentTurn = 1
     var gameState: GameState = .playing
 
+    // Roguelike progression
+    var currentAct = 1
+    var currentFloor = 1
+
     // Turn-flow + VFX presentation state (driven by the view's orchestrator)
     var turnBanner: TurnBanner = .none
     var playerVFX: SpriteVFX = .none
-    var enemyVFX: SpriteVFX = .none
     var isResolvingTurn = false
+
+    // The enemy the player's single-target cards will hit.
+    var currentTarget: Enemy? {
+        guard enemies.indices.contains(targetIndex) else { return nil }
+        return enemies[targetIndex]
+    }
+
+    var allEnemiesDead: Bool {
+        !enemies.isEmpty && enemies.allSatisfy { $0.currentHp <= 0 }
+    }
+
+    /// If the current target is dead, move the reticle to the first living enemy.
+    private func retargetIfNeeded() {
+        guard let t = currentTarget, t.isAlive else {
+            if let firstAlive = enemies.firstIndex(where: { $0.isAlive }) {
+                targetIndex = firstAlive
+            }
+            return
+        }
+    }
 
     var usedEnergy: Int {
         deck.hand
@@ -231,9 +312,9 @@ class GameEngine {
 
     init() {
         deck.initializeDeck()
-        deck.startCombat()
-        deck.drawCards(5)
-        enemy.advanceIntent(forTurn: currentTurn)
+        currentAct = 1
+        currentFloor = 1
+        startFloorCombat()
     }
 
     func canAfford(_ card: Card) -> Bool {
@@ -255,8 +336,8 @@ class GameEngine {
     // MARK: - Combat Resolution
 
     private func checkCombatResolution() {
-        if enemy.currentHp <= 0 {
-            enemy.currentHp = 0
+        // Victory only once every enemy is at 0 HP.
+        if allEnemiesDead {
             player.currentHp = player.maxHp
             gameState = .victory
         } else if player.currentHp <= 0 {
@@ -265,27 +346,34 @@ class GameEngine {
         }
     }
 
+    /// Vulnerable multiplier: each stack adds +50% damage (2 stacks = +100%).
+    private func vulnerableMultiplier(_ stacks: Int) -> Double {
+        1.0 + 0.5 * Double(max(0, stacks))
+    }
+
     // MARK: - Play Cards
 
     func playSelectedCards() {
         guard gameState == .playing else { return }
         let selected = deck.hand.filter { selectedCardIds.contains($0.id) }
         for card in selected {
-            if card.damage > 0 {
-                var raw = card.damage
-                if enemy.vulnerableTurns > 0 {
-                    raw = Int(floor(Double(raw) * 1.5))
+            // Single-target effects hit whichever enemy is currently selected.
+            if let target = currentTarget, target.isAlive {
+                if card.damage > 0 {
+                    let mult = vulnerableMultiplier(target.vulnerableTurns)
+                    let raw = Int(floor(Double(card.damage) * mult))
+                    let afterBlock = applyDamage(raw, to: target)
+                    target.currentHp = max(0, target.currentHp - afterBlock)
                 }
-                let afterBlock = applyDamageToEnemy(raw)
-                enemy.currentHp = max(0, enemy.currentHp - afterBlock)
+                if card.vulnerableApply > 0 {
+                    target.vulnerableTurns += card.vulnerableApply
+                }
             }
             if card.block > 0 {
                 player.currentBlock += card.block
             }
-            if card.vulnerableApply > 0 {
-                enemy.vulnerableTurns += card.vulnerableApply
-            }
 
+            retargetIfNeeded()
             checkCombatResolution()
             if gameState != .playing { break }
         }
@@ -302,7 +390,8 @@ class GameEngine {
         selectedCardIds.removeAll()
     }
 
-    private func applyDamageToEnemy(_ raw: Int) -> Int {
+    /// Apply `raw` damage to one enemy's block first, return the overflow to HP.
+    private func applyDamage(_ raw: Int, to enemy: Enemy) -> Int {
         let absorbed = min(raw, enemy.currentBlock)
         enemy.currentBlock -= absorbed
         return raw - absorbed
@@ -311,29 +400,36 @@ class GameEngine {
     // MARK: - Enemy Turn
 
     private func executeEnemyTurn() {
-        switch enemy.nextMove {
-        case .tackle(let baseDamage):
-            let totalDamage = baseDamage + enemy.strength
-            let remaining = totalDamage - player.currentBlock
-            player.currentBlock = max(0, player.currentBlock - totalDamage)
-            if remaining > 0 {
-                player.currentHp = max(0, player.currentHp - remaining)
+        // Every living enemy executes its queued move.
+        for enemy in enemies where enemy.isAlive {
+            switch enemy.nextMove {
+            case .tackle(let baseDamage):
+                let totalDamage = baseDamage + enemy.strength
+                let remaining = totalDamage - player.currentBlock
+                player.currentBlock = max(0, player.currentBlock - totalDamage)
+                if remaining > 0 {
+                    player.currentHp = max(0, player.currentHp - remaining)
+                }
+
+            case .gooSpit(let count):
+                var slimeCards: [Card] = []
+                for _ in 0..<count {
+                    slimeCards.append(.slime())
+                }
+                deck.injectIntoDiscard(slimeCards)
+
+            case .harden(let block, let strengthGain):
+                enemy.currentBlock += block
+                enemy.strength += strengthGain
+                enemy.clearDebuffs()
+
+            case .defend(let block):
+                enemy.currentBlock += block
             }
 
-        case .gooSpit(let count):
-            var slimeCards: [Card] = []
-            for _ in 0..<count {
-                slimeCards.append(.slime())
-            }
-            deck.injectIntoDiscard(slimeCards)
-
-        case .harden(let block, let strengthGain):
-            enemy.currentBlock += block
-            enemy.strength += strengthGain
-            enemy.clearDebuffs()
+            checkCombatResolution()
+            if gameState != .playing { return }
         }
-
-        checkCombatResolution()
     }
 
     // MARK: - End Turn
@@ -353,7 +449,7 @@ class GameEngine {
 
         player.currentEnergy = player.maxEnergy
         currentTurn += 1
-        enemy.advanceIntent(forTurn: currentTurn)
+        for enemy in enemies { enemy.advanceIntent(forTurn: currentTurn) }
         deck.drawCards(5)
     }
 
@@ -377,7 +473,7 @@ class GameEngine {
         guard gameState == .playing else { return }
         player.currentEnergy = player.maxEnergy
         currentTurn += 1
-        enemy.advanceIntent(forTurn: currentTurn)
+        for enemy in enemies { enemy.advanceIntent(forTurn: currentTurn) }
         deck.drawCards(5)
     }
 
@@ -390,35 +486,129 @@ class GameEngine {
         deck.hand.contains { selectedCardIds.contains($0.id) && $0.block > 0 }
     }
 
-    var enemyIntentAttacks: Bool {
-        if case .tackle = enemy.nextMove { return true }
-        return false
+    /// Any living enemy is about to attack the player this turn.
+    var anyEnemyAttacks: Bool {
+        enemies.contains { enemy in
+            guard enemy.isAlive else { return false }
+            if case .tackle = enemy.nextMove { return true }
+            return false
+        }
     }
 
-    var enemyIntentBuffsSelf: Bool {
-        if case .harden = enemy.nextMove { return true }
-        return false
+    /// A living enemy is about to spit goo at the player this turn.
+    var anyEnemyGooSpits: Bool {
+        enemies.contains { enemy in
+            guard enemy.isAlive else { return false }
+            if case .gooSpit = enemy.nextMove { return true }
+            return false
+        }
     }
 
-    // MARK: - Restart
+    /// Indices of living enemies whose queued move is a self-buff (defend/harden).
+    var buffingEnemyIndices: [Int] {
+        enemies.indices.filter { i in
+            let enemy = enemies[i]
+            guard enemy.isAlive else { return false }
+            switch enemy.nextMove {
+            case .harden, .defend: return true
+            default: return false
+            }
+        }
+    }
 
-    func restartCombat() {
-        player.currentHp = player.maxHp
+    // MARK: - Progression
+
+    func nodeForFloor(_ floor: Int) -> FloorNode {
+        switch floor {
+        case 1: return .combat
+        case 2: return .elite
+        case 3: return .rest
+        case 4: return .boss
+        default: return .combat
+        }
+    }
+
+    private func spawnEnemies(for node: FloorNode) -> [Enemy] {
+        switch node {
+        case .combat: return [.basicOoze()]
+        case .elite:  return [.acidSlime(), .basicSlime()]
+        case .boss:   return [.slimeKing()]
+        case .rest:   return []
+        }
+    }
+
+    /// Set up (or reset) the combat encounter for the current floor. Player HP is
+    /// left untouched so it can carry over between floors — callers that want a
+    /// full reset (dev retry) restore it themselves before calling this.
+    func startFloorCombat() {
+        let node = nodeForFloor(currentFloor)
+        enemies = spawnEnemies(for: node)
+        targetIndex = 0
+        for enemy in enemies { enemy.advanceIntent(forTurn: 1) }
+
         player.currentBlock = 0
         player.currentEnergy = player.maxEnergy
 
-        enemy.reset()
-
-        deck.startCombat()
+        deck.startCombat()   // reshuffle masterDeck into drawPile, clear temp piles
         deck.drawCards(5)
 
         selectedCardIds.removeAll()
         currentTurn = 1
-        enemy.advanceIntent(forTurn: currentTurn)
         turnBanner = .none
         playerVFX = .none
-        enemyVFX = .none
         isResolvingTurn = false
         gameState = .playing
+    }
+
+    /// Load whatever node the current floor points at (combat or rest).
+    private func loadCurrentFloor() {
+        switch nodeForFloor(currentFloor) {
+        case .rest:
+            gameState = .rest
+        default:
+            startFloorCombat()
+        }
+    }
+
+    /// Victory "Next Floor" button — advance to the next node, or the next act.
+    func advanceToNextFloor() {
+        if currentFloor >= 4 {
+            // Beat the Act boss → move to the next act (placeholder for now).
+            currentAct += 1
+            currentFloor = 1
+            gameState = .actComplete
+            return
+        }
+        currentFloor += 1
+        loadCurrentFloor()
+    }
+
+    /// Rest-site "Heal" button — restore 30% max HP, then advance to the next floor.
+    func restHealAndAdvance() {
+        let healAmount = Int(Double(player.maxHp) * 0.30)
+        player.currentHp = min(player.maxHp, player.currentHp + healAmount)
+        currentFloor += 1
+        loadCurrentFloor()
+    }
+
+    /// DEV ONLY — instantly win the current encounter to fast-forward testing.
+    func devWinCombat() {
+        for enemy in enemies { enemy.currentHp = 0; enemy.vfx = .none }
+        player.currentHp = player.maxHp
+        turnBanner = .none
+        playerVFX = .none
+        isResolvingTurn = false
+        gameState = .victory
+    }
+
+    // MARK: - Restart (dev-mode retry of the exact current fight)
+
+    func restartCombat() {
+        // Full reset of health pools for a clean re-attempt of the same floor.
+        player.currentHp = player.maxHp
+        // Reuse the floor-combat setup (reshuffles masterDeck, resets enemy,
+        // energy, block, turn/VFX state) without touching currentFloor/currentAct
+        // or the masterDeck itself.
+        startFloorCombat()
     }
 }
