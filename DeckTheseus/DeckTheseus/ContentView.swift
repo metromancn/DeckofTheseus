@@ -274,10 +274,12 @@ struct ContentView: View {
     @State private var draftCards: [Card] = []
     @State private var draftDealtIds: Set<UUID> = []
     @State private var draftRevealedIds: Set<UUID> = []
+    @State private var draftSelectedId: UUID? = nil
 
     // Relics
     @State private var relicTooltipId: UUID? = nil
     @State private var earnedRelicBanner: Relic? = nil
+    @State private var relicBannerContinuation: CheckedContinuation<Void, Never>? = nil
 
     var body: some View {
         GeometryReader { geo in
@@ -327,9 +329,12 @@ struct ContentView: View {
                 // DEV ONLY — instant-win the fight to speed up testing.
                 if engine.gameState == .playing {
                     Button {
+                        guard engine.gameState == .playing, !engine.isResolvingTurn else { return }
                         isEnemyTurn = false
-                        engine.devWinCombat()
-                        if engine.gameState == .playing { dealNewHand() }
+                        engine.devWinCombat()          // kills all enemies, awards relic, marks .victory
+                        Task { @MainActor in
+                            await handleCombatWon()    // relic reveal → victory screen
+                        }
                     } label: {
                         Text("SKIP \u{25B6}")
                             .font(.pixel(titleFont * 0.9))
@@ -576,6 +581,11 @@ struct ContentView: View {
                                 .font(.pixel(min(unit * 0.034, 22)))
                                 .foregroundColor(.textMuted)
                                 .multilineTextAlignment(.center)
+
+                            Text("Tap anywhere to close")
+                                .font(.pixel(min(unit * 0.028, 18)))
+                                .foregroundColor(Color(hex: 0x6A5A78))
+                                .padding(.top, unit * 0.02)
                         }
                         .padding(.horizontal, unit * 0.06)
                         .padding(.vertical, unit * 0.05)
@@ -589,8 +599,12 @@ struct ContentView: View {
                         )
                         .shadow(color: Color.goldBright.opacity(0.4), radius: 24)
                     }
-                    .transition(.opacity.combined(with: .scale(scale: 0.88)))
-                    .allowsHitTesting(false)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        relicBannerContinuation?.resume()
+                        relicBannerContinuation = nil
+                    }
+                    .transition(.opacity)
                     .zIndex(950)
                 }
 
@@ -634,11 +648,24 @@ struct ContentView: View {
                             switch engine.gameState {
                             case .victory:
                                 overlayTitle("VICTORY", size: titleFontSize, color: .goldBright)
-                                Text("Act \(engine.currentAct) cleared!")
+                                Text("Act \(engine.currentAct) - Floor \(engine.currentFloor) cleared!")
                                     .font(.pixel(btnFontSize))
                                     .foregroundColor(.textParchment)
-                                overlayButton("CONTINUE", fontSize: btnFontSize) {
-                                    engine.advanceToNextAct()
+                                HStack(spacing: unit * 0.05) {
+                                    overlayButton("NEXT STAGE", fontSize: btnFontSize) {
+                                        isEnemyTurn = false
+                                        if engine.isBossFloor {
+                                            engine.advanceToNextAct()
+                                        } else {
+                                            engine.advanceToNextFloor()
+                                        }
+                                        if engine.gameState == .playing { dealNewHand() }
+                                    }
+                                    overlayButton("RESTART", fontSize: btnFontSize) {
+                                        isEnemyTurn = false
+                                        engine.restartCombat()
+                                        dealNewHand()
+                                    }
                                 }
 
                             case .defeat:
@@ -782,9 +809,10 @@ struct ContentView: View {
                 ForEach(draftCards) { card in
                     let dealt = draftDealtIds.contains(card.id)
                     let revealed = draftRevealedIds.contains(card.id)
+                    let selected = draftSelectedId == card.id
                     Group {
                         if revealed {
-                            CardView(card: card, isSelected: false, isAffordable: true,
+                            CardView(card: card, isSelected: selected, isAffordable: true,
                                      showTooltip: tooltipCardId == card.id,
                                      cardWidth: draftCardW, cardHeight: draftCardH)
                         } else {
@@ -793,13 +821,15 @@ struct ContentView: View {
                     }
                     .opacity(dealt ? 1 : 0)
                     .scaleEffect(dealt ? 1 : 0.6)
-                    .zIndex(tooltipCardId == card.id ? 10 : 0)
+                    .offset(y: selected ? -draftCardH * 0.08 : 0)
+                    .zIndex(tooltipCardId == card.id ? 10 : (selected ? 5 : 0))
                     .contentShape(Rectangle())
                     .onTapGesture {
                         guard revealed else { return }
                         tooltipCardId = nil
-                        engine.draftCard(card)
-                        if engine.gameState == .playing { dealNewHand() }
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            draftSelectedId = card.id
+                        }
                     }
                     .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
                         withAnimation(.easeInOut(duration: 0.2)) {
@@ -809,12 +839,18 @@ struct ContentView: View {
                 }
             }
 
-            overlayButton("SKIP REWARD", fontSize: btnFontSize) {
-                engine.skipDraft()
+            overlayButton("SELECT CARD", fontSize: btnFontSize) {
+                guard let id = draftSelectedId,
+                      let card = draftCards.first(where: { $0.id == id }) else { return }
+                tooltipCardId = nil
+                engine.draftCard(card)
                 if engine.gameState == .playing { dealNewHand() }
             }
+            .opacity(draftSelectedId == nil ? 0.4 : 1.0)
+            .disabled(draftSelectedId == nil)
         }
         .onAppear {
+            draftSelectedId = nil
             let cards = Card.availableDraftCards
             draftCards = cards
             dealDraftCards(cards)
@@ -847,31 +883,28 @@ struct ContentView: View {
     private let healAnimDuration = 0.8      // 10 frames
     private let comprehendPause = 0.8       // beat so the user can read the board
 
-    /// Combat won: Floors 1–2 auto-advance to the next floor; the boss shows VICTORY.
+    /// Combat won: reveal any relic, then show the stage-cleared VICTORY screen.
     @MainActor
     private func handleCombatWon() async {
         isEnemyTurn = false
         try? await Task.sleep(for: .seconds(0.55))
 
-        // Announce any relic earned from this fight — shown first, prominently,
-        // before advancing to the next floor.
+        // Announce any relic earned from this fight — shown first, prominently.
+        // Stays up until the player taps anywhere to close it.
         if let relic = engine.justEarnedRelic {
             engine.justEarnedRelic = nil
             withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) {
                 earnedRelicBanner = relic
             }
-            try? await Task.sleep(for: .seconds(2.4))
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                relicBannerContinuation = cont
+            }
             withAnimation(.easeOut(duration: 0.3)) { earnedRelicBanner = nil }
             try? await Task.sleep(for: .seconds(0.35))
         }
 
-        if engine.isBossFloor {
-            engine.isResolvingTurn = false   // gameState stays .victory → overlay shows
-        } else {
-            engine.advanceToNextFloor()      // Floor 2 combat, or Floor 3 rest site
-            engine.isResolvingTurn = false
-            if engine.gameState == .playing { dealNewHand() }
-        }
+        // gameState stays .victory → the victory overlay (Next Stage / Restart) shows.
+        engine.isResolvingTurn = false
     }
 
     private func resolveTurn(size: CGSize) {

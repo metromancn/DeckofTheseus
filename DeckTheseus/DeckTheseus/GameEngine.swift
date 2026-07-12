@@ -695,19 +695,15 @@ class GameEngine {
         advanceToNextFloor()
     }
 
-    /// DEV ONLY — instantly clear the current encounter to fast-forward testing.
+    /// DEV ONLY — instantly kill every enemy so the round resolves as a normal win
+    /// (awards the floor's relic, triggers the relic reveal + victory screen).
     func devWinCombat() {
         for enemy in enemies { enemy.currentHp = 0; enemy.vfx = .none }
         turnBanner = .none
         playerVFX = .none
-        isResolvingTurn = false
-        if isBossFloor {
-            gameState = .victory
-        } else {
-            awardFloorRelicIfNeeded()
-            justEarnedRelic = nil   // dev skip doesn't play the relic banner
-            advanceToNextFloor()
-        }
+        isResolvingTurn = true   // suppress the overlay until the win sequence finishes
+        awardFloorRelicIfNeeded()
+        gameState = .victory
     }
 
     // MARK: - Restart (dev-mode retry of the exact current fight)
