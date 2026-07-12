@@ -44,6 +44,21 @@ enum SpriteVFX {
     case healDebuff   // heal_debuff_animation2
 }
 
+// MARK: - Relics
+
+struct Relic: Identifiable {
+    let id = UUID()
+    let name: String
+    let description: String
+    let iconName: String
+
+    static var vampireTooth: Relic {
+        Relic(name: "Vampire Tooth",
+              description: "Heal 2 HP when you play an Attack card",
+              iconName: "relic_vampire_tooth")
+    }
+}
+
 struct Card: Identifiable {
     let id = UUID()
     let name: String
@@ -201,11 +216,11 @@ class Enemy: Identifiable {
               rotation: [.tackle(baseDamage: 6), .defend(block: 5)])
     }
 
-    /// Floor 2 — first enemy.
+    /// Floor 2 Elite — alternates a 10-damage attack and a 10 block defend.
     static func acidSlime() -> Enemy {
         Enemy(name: "Acid Slime", maxHp: 60, spriteName: "enemy_slime_basic",
               spriteContentW: 0.453, spriteContentH: 0.375,
-              rotation: [.tackle(baseDamage: 10), .defend(block: 10), .tackle(baseDamage: 8)])
+              rotation: [.tackle(baseDamage: 10), .defend(block: 10)])
     }
 
     /// Floor 2 — second enemy.
@@ -293,6 +308,14 @@ class GameEngine {
     var extraEnergyNextTurn: Int = 0
     var extraBlockNextTurn: Int = 0
 
+    // Relics
+    var playerRelics: [Relic] = []
+    var justEarnedRelic: Relic? = nil   // set when a relic is awarded, for the UI banner
+
+    func hasRelic(named name: String) -> Bool {
+        playerRelics.contains { $0.name == name }
+    }
+
     // Turn-flow + VFX presentation state (driven by the view's orchestrator)
     var turnBanner: TurnBanner = .none
     var playerVFX: SpriteVFX = .none
@@ -367,11 +390,20 @@ class GameEngine {
         // A combat is "won" once every enemy is at 0 HP. The floor logic (auto-
         // advance vs. terminal victory) is decided by the turn orchestrator.
         if allEnemiesDead {
+            awardFloorRelicIfNeeded()
             gameState = .victory
         } else if player.currentHp <= 0 {
             player.currentHp = 0
             gameState = .defeat
         }
+    }
+
+    /// The Floor 2 (Elite) fight rewards the Vampire Tooth relic.
+    private func awardFloorRelicIfNeeded() {
+        guard nodeForFloor(currentFloor) == .elite,
+              !hasRelic(named: "Vampire Tooth") else { return }
+        playerRelics.append(.vampireTooth)
+        justEarnedRelic = .vampireTooth
     }
 
     /// Vulnerable multiplier: each stack adds +50% damage (2 stacks = +100%).
@@ -414,6 +446,11 @@ class GameEngine {
             }
             if card.blockNextTurn > 0 {
                 extraBlockNextTurn += card.blockNextTurn
+            }
+
+            // Relic: Vampire Tooth — heal 2 HP whenever a damaging card is played.
+            if card.damage > 0, hasRelic(named: "Vampire Tooth") {
+                player.currentHp = min(player.maxHp, player.currentHp + 2)
             }
 
             retargetIfNeeded()
@@ -667,6 +704,8 @@ class GameEngine {
         if isBossFloor {
             gameState = .victory
         } else {
+            awardFloorRelicIfNeeded()
+            justEarnedRelic = nil   // dev skip doesn't play the relic banner
             advanceToNextFloor()
         }
     }

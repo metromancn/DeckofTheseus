@@ -275,6 +275,10 @@ struct ContentView: View {
     @State private var draftDealtIds: Set<UUID> = []
     @State private var draftRevealedIds: Set<UUID> = []
 
+    // Relics
+    @State private var relicTooltipId: UUID? = nil
+    @State private var earnedRelicBanner: Relic? = nil
+
     var body: some View {
         GeometryReader { geo in
             let unit = min(geo.size.width, geo.size.height)
@@ -434,8 +438,17 @@ struct ContentView: View {
                 .padding(.leading, 16)
                 .padding(.bottom, 8)
 
-                // Bottom-RIGHT: Energy directly above End Turn (compact)
+                // Bottom-RIGHT: Relics, then Energy, then End Turn (compact)
                 VStack(alignment: .trailing, spacing: 6) {
+                    // Relic bar — sits right above the energy orb.
+                    if !engine.playerRelics.isEmpty {
+                        HStack(spacing: 8) {
+                            ForEach(engine.playerRelics) { relic in
+                                relicIcon(relic, size: orbSize * 0.45)
+                            }
+                        }
+                    }
+
                     HStack(spacing: 6) {
                         PixelImage(name: "hud_energy_orb", width: orbSize * 0.7, height: orbSize * 0.7)
                             .shadow(color: Color(hex: 0xA040D0).opacity(0.6), radius: 10)
@@ -539,6 +552,48 @@ struct ContentView: View {
                         .zIndex(750)
                 }
 
+                // New-relic reveal — a prominent centered modal.
+                if let relic = earnedRelicBanner {
+                    ZStack {
+                        Color.black.opacity(0.65)
+                            .ignoresSafeArea()
+
+                        VStack(spacing: unit * 0.03) {
+                            Text("NEW RELIC!")
+                                .font(.pixel(min(unit * 0.075, 52)))
+                                .foregroundColor(.goldBright)
+                                .shadow(color: Color.goldBright.opacity(0.8), radius: 16)
+
+                            CroppedSprite(name: relic.iconName, contentW: 0.578, contentH: 0.266,
+                                          targetH: min(unit * 0.09, 72))
+                                .shadow(color: Color.goldBright.opacity(0.5), radius: 12)
+
+                            Text(relic.name)
+                                .font(.pixel(min(unit * 0.055, 38)))
+                                .foregroundColor(.textParchment)
+
+                            Text(relic.description)
+                                .font(.pixel(min(unit * 0.034, 22)))
+                                .foregroundColor(.textMuted)
+                                .multilineTextAlignment(.center)
+                        }
+                        .padding(.horizontal, unit * 0.06)
+                        .padding(.vertical, unit * 0.05)
+                        .background(
+                            RoundedRectangle(cornerRadius: 14)
+                                .fill(Color(hex: 0x1A1428).opacity(0.96))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14)
+                                .stroke(Color.goldBright.opacity(0.75), lineWidth: 3)
+                        )
+                        .shadow(color: Color.goldBright.opacity(0.4), radius: 24)
+                    }
+                    .transition(.opacity.combined(with: .scale(scale: 0.88)))
+                    .allowsHitTesting(false)
+                    .zIndex(950)
+                }
+
                 // Turn-state notifier banner
                 if engine.turnBanner != .none {
                     let isPlayer = engine.turnBanner == .playerTurn
@@ -560,8 +615,10 @@ struct ContentView: View {
                         .zIndex(800)
                 }
 
-                // Non-combat overlays
-                if engine.gameState != .playing {
+                // Non-combat overlays (hidden while the turn orchestrator is mid-resolve,
+                // so a Floor 1/2 win doesn't briefly flash the VICTORY screen before it
+                // auto-advances to the next floor).
+                if engine.gameState != .playing && !engine.isResolvingTurn {
                     let titleFontSize = min(unit * 0.12, 80)
                     let btnFontSize = min(unit * 0.045, 30)
 
@@ -666,6 +723,48 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
+    // MARK: - Relic Icon (with hold-to-read tooltip)
+
+    private func relicIcon(_ relic: Relic, size: CGFloat) -> some View {
+        CroppedSprite(name: relic.iconName, contentW: 0.578, contentH: 0.266, targetH: size)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(Color.black.opacity(0.35))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(Color.goldBorder.opacity(0.7), lineWidth: 1.5)
+                    )
+            )
+            .overlay(alignment: .topTrailing) {
+                if relicTooltipId == relic.id {
+                    Text(relic.description)
+                        .font(.pixel(min(size * 0.75, 18)))
+                        .foregroundColor(.textParchment)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color(hex: 0x1A1428).opacity(0.97))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(Color.goldBorder, lineWidth: 1)
+                        )
+                        .fixedSize()
+                        .offset(y: -(size * 2.6))   // sit above the icon (bottom of screen)
+                        .zIndex(50)
+                }
+            }
+            .contentShape(Rectangle())
+            .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    relicTooltipId = pressing ? relic.id : nil
+                }
+            }, perform: {})
+    }
+
     // MARK: - Card Draft (Floor 3)
 
     @ViewBuilder
@@ -753,6 +852,19 @@ struct ContentView: View {
     private func handleCombatWon() async {
         isEnemyTurn = false
         try? await Task.sleep(for: .seconds(0.55))
+
+        // Announce any relic earned from this fight — shown first, prominently,
+        // before advancing to the next floor.
+        if let relic = engine.justEarnedRelic {
+            engine.justEarnedRelic = nil
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) {
+                earnedRelicBanner = relic
+            }
+            try? await Task.sleep(for: .seconds(2.4))
+            withAnimation(.easeOut(duration: 0.3)) { earnedRelicBanner = nil }
+            try? await Task.sleep(for: .seconds(0.35))
+        }
+
         if engine.isBossFloor {
             engine.isResolvingTurn = false   // gameState stays .victory → overlay shows
         } else {
