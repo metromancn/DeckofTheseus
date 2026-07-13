@@ -179,21 +179,28 @@ class Enemy: Identifiable {
     var spriteName: String
     var spriteContentW: CGFloat
     var spriteContentH: CGFloat
+    var spriteScale: CGFloat   // display size relative to the boss sprite height
 
     // Repeating list of moves; advanceIntent walks through it by turn number.
     var rotation: [EnemyIntent]
     var nextMove: EnemyIntent
 
+    // Relic awarded to the player when this enemy dies (Elites drop relics).
+    let dropsRelic: Relic?
+
     init(name: String, maxHp: Int, spriteName: String,
-         spriteContentW: CGFloat, spriteContentH: CGFloat, rotation: [EnemyIntent]) {
+         spriteContentW: CGFloat, spriteContentH: CGFloat, rotation: [EnemyIntent],
+         spriteScale: CGFloat = 1.0, dropsRelic: Relic? = nil) {
         self.name = name
         self.maxHp = maxHp
         self.currentHp = maxHp
         self.spriteName = spriteName
         self.spriteContentW = spriteContentW
         self.spriteContentH = spriteContentH
+        self.spriteScale = spriteScale
         self.rotation = rotation
         self.nextMove = rotation.first ?? .tackle(baseDamage: 0)
+        self.dropsRelic = dropsRelic
     }
 
     var isAlive: Bool { currentHp > 0 }
@@ -209,25 +216,29 @@ class Enemy: Identifiable {
 
     // MARK: - Enemy factories
 
-    /// Floor 1 — standard slime.
+    /// Floor 1 — standard slime (small).
     static func basicOoze() -> Enemy {
-        Enemy(name: "Ooze", maxHp: 40, spriteName: "enemy_slime_basic",
+        Enemy(name: "Slime", maxHp: 40, spriteName: "enemy_slime_basic",
               spriteContentW: 0.453, spriteContentH: 0.375,
-              rotation: [.tackle(baseDamage: 6), .defend(block: 5)])
+              rotation: [.tackle(baseDamage: 6), .defend(block: 5)],
+              spriteScale: 0.5)
     }
 
     /// Floor 2 Elite — alternates a 10-damage attack and a 10 block defend.
+    /// Drops the Vampire Tooth relic the moment it dies.
     static func acidSlime() -> Enemy {
-        Enemy(name: "Acid Slime", maxHp: 60, spriteName: "enemy_slime_basic",
+        Enemy(name: "Acid Slime", maxHp: 60, spriteName: "enemy_acid_slime_elite",
               spriteContentW: 0.453, spriteContentH: 0.375,
-              rotation: [.tackle(baseDamage: 10), .defend(block: 10)])
+              rotation: [.tackle(baseDamage: 10), .defend(block: 10)],
+              spriteScale: 0.78, dropsRelic: .vampireTooth)
     }
 
-    /// Floor 2 — second enemy.
+    /// Floor 2 — second (small) slime.
     static func basicSlime() -> Enemy {
-        Enemy(name: "Basic Slime", maxHp: 40, spriteName: "enemy_slime_basic",
+        Enemy(name: "Slime", maxHp: 40, spriteName: "enemy_slime_basic",
               spriteContentW: 0.453, spriteContentH: 0.375,
-              rotation: [.tackle(baseDamage: 9), .defend(block: 6), .tackle(baseDamage: 6)])
+              rotation: [.tackle(baseDamage: 9), .defend(block: 6), .tackle(baseDamage: 6)],
+              spriteScale: 0.5)
     }
 
     /// Floor 4 — the Act boss.
@@ -308,12 +319,34 @@ class GameEngine {
     var extraEnergyNextTurn: Int = 0
     var extraBlockNextTurn: Int = 0
 
-    // Relics
+    // Relics — the player owns many but only one is equipped (active).
     var playerRelics: [Relic] = []
+    var equippedRelicId: UUID? = nil
     var justEarnedRelic: Relic? = nil   // set when a relic is awarded, for the UI banner
 
     func hasRelic(named name: String) -> Bool {
         playerRelics.contains { $0.name == name }
+    }
+
+    var equippedRelic: Relic? {
+        guard let id = equippedRelicId else { return nil }
+        return playerRelics.first { $0.id == id }
+    }
+
+    /// Equip the relic, or unequip it if it's already the equipped one.
+    func toggleEquip(_ id: UUID) {
+        equippedRelicId = (equippedRelicId == id) ? nil : id
+    }
+
+    /// Award relics for any enemy that just died carrying one. Auto-equips the
+    /// first relic earned so its effect is active immediately.
+    private func checkRelicDrops() {
+        for enemy in enemies where !enemy.isAlive {
+            guard let relic = enemy.dropsRelic, !hasRelic(named: relic.name) else { continue }
+            playerRelics.append(relic)
+            if equippedRelicId == nil { equippedRelicId = relic.id }
+            justEarnedRelic = relic
+        }
     }
 
     // Turn-flow + VFX presentation state (driven by the view's orchestrator)
@@ -389,21 +422,13 @@ class GameEngine {
     private func checkCombatResolution() {
         // A combat is "won" once every enemy is at 0 HP. The floor logic (auto-
         // advance vs. terminal victory) is decided by the turn orchestrator.
+        // (Relics are awarded on the individual enemy's death via checkRelicDrops.)
         if allEnemiesDead {
-            awardFloorRelicIfNeeded()
             gameState = .victory
         } else if player.currentHp <= 0 {
             player.currentHp = 0
             gameState = .defeat
         }
-    }
-
-    /// The Floor 2 (Elite) fight rewards the Vampire Tooth relic.
-    private func awardFloorRelicIfNeeded() {
-        guard nodeForFloor(currentFloor) == .elite,
-              !hasRelic(named: "Vampire Tooth") else { return }
-        playerRelics.append(.vampireTooth)
-        justEarnedRelic = .vampireTooth
     }
 
     /// Vulnerable multiplier: each stack adds +50% damage (2 stacks = +100%).
@@ -448,11 +473,12 @@ class GameEngine {
                 extraBlockNextTurn += card.blockNextTurn
             }
 
-            // Relic: Vampire Tooth — heal 2 HP whenever a damaging card is played.
-            if card.damage > 0, hasRelic(named: "Vampire Tooth") {
+            // Relic: Vampire Tooth (only when equipped) — heal 2 HP on a damaging card.
+            if card.damage > 0, equippedRelic?.name == "Vampire Tooth" {
                 player.currentHp = min(player.maxHp, player.currentHp + 2)
             }
 
+            checkRelicDrops()   // award a relic the instant an elite dies
             retargetIfNeeded()
             checkCombatResolution()
             if gameState != .playing { break }
@@ -702,7 +728,7 @@ class GameEngine {
         turnBanner = .none
         playerVFX = .none
         isResolvingTurn = true   // suppress the overlay until the win sequence finishes
-        awardFloorRelicIfNeeded()
+        checkRelicDrops()        // award drops for the enemies we just killed
         gameState = .victory
     }
 

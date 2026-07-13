@@ -280,6 +280,7 @@ struct ContentView: View {
     @State private var relicTooltipId: UUID? = nil
     @State private var earnedRelicBanner: Relic? = nil
     @State private var relicBannerContinuation: CheckedContinuation<Void, Never>? = nil
+    @State private var showInventory = false
 
     var body: some View {
         GeometryReader { geo in
@@ -390,14 +391,15 @@ struct ContentView: View {
                 .padding(.leading, sideMargin)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-                // Enemies (RIGHT) — one or more; tap a sprite to target it
-                let enemySpriteH = engine.enemies.count > 1 ? bossSpriteH * 0.78 : bossSpriteH
+                // Enemies (RIGHT) — one or more; tap a sprite to target it.
+                // Each enemy's display size comes from its own spriteScale so it's
+                // consistent across every floor it appears on.
                 HStack(alignment: .top, spacing: sideMargin * 0.5) {
                     ForEach(Array(engine.enemies.enumerated()), id: \.element.id) { index, enemy in
                         EnemyView(
                             enemy: enemy,
                             isTarget: index == engine.targetIndex,
-                            spriteH: enemySpriteH,
+                            spriteH: bossSpriteH * enemy.spriteScale,
                             groundH: bossSpriteH,
                             heartSize: heartSize,
                             nameFont: nameFont,
@@ -443,16 +445,10 @@ struct ContentView: View {
                 .padding(.leading, 16)
                 .padding(.bottom, 8)
 
-                // Bottom-RIGHT: Relics, then Energy, then End Turn (compact)
+                // Bottom-RIGHT: Relic bar, then Energy, then End Turn (compact)
                 VStack(alignment: .trailing, spacing: 6) {
-                    // Relic bar — sits right above the energy orb.
-                    if !engine.playerRelics.isEmpty {
-                        HStack(spacing: 8) {
-                            ForEach(engine.playerRelics) { relic in
-                                relicIcon(relic, size: orbSize * 0.45)
-                            }
-                        }
-                    }
+                    // Relic bar — always shown; tap to open the inventory.
+                    relicBar(size: orbSize * 0.5)
 
                     HStack(spacing: 6) {
                         PixelImage(name: "hud_energy_orb", width: orbSize * 0.7, height: orbSize * 0.7)
@@ -555,6 +551,12 @@ struct ContentView: View {
                         .position(pos)
                         .allowsHitTesting(false)
                         .zIndex(750)
+                }
+
+                // Relic inventory (centered modal, opened from the relic bar).
+                if showInventory {
+                    inventoryOverlay(unit: unit)
+                        .zIndex(970)
                 }
 
                 // New-relic reveal — a prominent centered modal.
@@ -750,46 +752,152 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - Relic Icon (with hold-to-read tooltip)
+    // MARK: - Relic Bar & Inventory
 
-    private func relicIcon(_ relic: Relic, size: CGFloat) -> some View {
-        CroppedSprite(name: relic.iconName, contentW: 0.578, contentH: 0.266, targetH: size)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 5)
+    /// A small description bubble matching the card tooltip look.
+    private func relicTooltipBubble(_ relic: Relic) -> some View {
+        Text(relic.description)
+            .font(.pixel(15))
+            .foregroundColor(.textParchment)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 4).fill(Color(hex: 0x1A1428).opacity(0.97)))
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.goldBorder, lineWidth: 1))
+            .fixedSize()
+    }
+
+    /// The always-visible relic bar — fixed size, shows the equipped relic (or a
+    /// "?" when nothing is equipped), and opens the inventory on tap.
+    private func relicBar(size: CGFloat) -> some View {
+        let barW = size * 2.2   // width of the (wide) relic icon at this height
+        return Group {
+            if let relic = engine.equippedRelic {
+                CroppedSprite(name: relic.iconName, contentW: 0.578, contentH: 0.266, targetH: size)
+            } else {
+                Text("?")
+                    .font(.pixel(size * 1.1))
+                    .foregroundColor(Color(hex: 0x8A7AA0))
+            }
+        }
+        .frame(width: barW, height: size)   // identical size in every state
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(Color.black.opacity(0.35))
+                .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.goldBorder.opacity(0.7), lineWidth: 1.5))
+        )
+        .contentShape(Rectangle())          // consistent hitbox across states
+        .overlay(alignment: .topTrailing) {
+            // Only while the inventory is closed, so it doesn't double up.
+            if !showInventory, let relic = engine.equippedRelic, relicTooltipId == relic.id {
+                relicTooltipBubble(relic)
+                    .offset(y: -(size * 2.6))
+                    .zIndex(50)
+            }
+        }
+        .onTapGesture { showInventory = true }
+        .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
+            withAnimation(.easeInOut(duration: 0.2)) {
+                relicTooltipId = (pressing ? engine.equippedRelic?.id : nil)
+            }
+        }, perform: {})
+    }
+
+    /// One relic slot inside the inventory grid (tap to equip/unequip, hold to read).
+    private func inventoryRelicSlot(_ relic: Relic, size: CGFloat) -> some View {
+        let equipped = engine.equippedRelicId == relic.id
+        // Icon fits inside the square with padding (wide art → scale by width).
+        return CroppedSprite(name: relic.iconName, contentW: 0.578, contentH: 0.266, targetH: size * 0.34)
+            .frame(width: size, height: size)
             .background(
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(Color.black.opacity(0.35))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 5)
-                            .stroke(Color.goldBorder.opacity(0.7), lineWidth: 1.5)
-                    )
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(equipped ? Color.goldAccent.opacity(0.30) : Color.black.opacity(0.30))
             )
-            .overlay(alignment: .topTrailing) {
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(equipped ? Color.goldBright : Color.goldBorder.opacity(0.6),
+                            lineWidth: equipped ? 3 : 1.5)
+            )
+            .overlay(alignment: .bottom) {
+                // Below the slot so it isn't hidden behind the "RELICS" header.
                 if relicTooltipId == relic.id {
-                    Text(relic.description)
-                        .font(.pixel(min(size * 0.75, 18)))
-                        .foregroundColor(.textParchment)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Color(hex: 0x1A1428).opacity(0.97))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 4)
-                                .stroke(Color.goldBorder, lineWidth: 1)
-                        )
-                        .fixedSize()
-                        .offset(y: -(size * 2.6))   // sit above the icon (bottom of screen)
+                    relicTooltipBubble(relic)
+                        .offset(y: size * 0.85)
                         .zIndex(50)
                 }
             }
             .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.easeOut(duration: 0.15)) { engine.toggleEquip(relic.id) }
+            }
             .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    relicTooltipId = pressing ? relic.id : nil
-                }
+                withAnimation(.easeInOut(duration: 0.2)) { relicTooltipId = pressing ? relic.id : nil }
             }, perform: {})
+    }
+
+    /// The centered relic inventory modal.
+    @ViewBuilder
+    private func inventoryOverlay(unit: CGFloat) -> some View {
+        let boxW = min(unit * 0.62, 460)
+        let boxH = min(unit * 0.55, 420)
+        let slotSize = unit * 0.14
+        let headerFont = min(unit * 0.045, 30)
+
+        Color.black.opacity(0.6)
+            .ignoresSafeArea()
+            .contentShape(Rectangle())
+            .onTapGesture { relicTooltipId = nil; showInventory = false }
+
+        VStack(spacing: 0) {
+            HStack {
+                Text("RELICS")
+                    .font(.pixel(headerFont))
+                    .foregroundColor(.goldBright)
+                Spacer()
+                Button {
+                    relicTooltipId = nil
+                    showInventory = false
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: headerFont * 0.7, weight: .bold))
+                        .foregroundColor(.textParchment)
+                        .padding(8)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 6)
+
+            Rectangle().fill(Color.goldBorder.opacity(0.5)).frame(height: 1)
+                .padding(.horizontal, 12)
+
+            if engine.playerRelics.isEmpty {
+                Text("You do not own any relics!\nDefeat Elite enemies to gain relics.")
+                    .font(.pixel(min(unit * 0.032, 22)))
+                    .foregroundColor(.textMuted)
+                    .multilineTextAlignment(.center)
+                    .padding(24)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: slotSize + 12), spacing: 12)],
+                        spacing: 12
+                    ) {
+                        ForEach(engine.playerRelics) { relic in
+                            inventoryRelicSlot(relic, size: slotSize)
+                        }
+                    }
+                    .padding(16)
+                }
+            }
+        }
+        .frame(width: boxW, height: boxH)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color(hex: 0x18122A)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.goldBorder, lineWidth: 2))
+        .shadow(color: .black.opacity(0.6), radius: 20)
     }
 
     // MARK: - Card Draft (Floor 3)
@@ -883,26 +991,28 @@ struct ContentView: View {
     private let healAnimDuration = 0.8      // 10 frames
     private let comprehendPause = 0.8       // beat so the user can read the board
 
-    /// Combat won: reveal any relic, then show the stage-cleared VICTORY screen.
+    /// Show the prominent relic reveal if one was just earned. Stays up until the
+    /// player taps anywhere to close it. No-op if nothing was earned.
+    @MainActor
+    private func revealEarnedRelicIfAny() async {
+        guard let relic = engine.justEarnedRelic else { return }
+        engine.justEarnedRelic = nil
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) {
+            earnedRelicBanner = relic
+        }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            relicBannerContinuation = cont
+        }
+        withAnimation(.easeOut(duration: 0.3)) { earnedRelicBanner = nil }
+        try? await Task.sleep(for: .seconds(0.35))
+    }
+
+    /// Combat won: reveal any relic not yet shown, then the VICTORY screen.
     @MainActor
     private func handleCombatWon() async {
         isEnemyTurn = false
         try? await Task.sleep(for: .seconds(0.55))
-
-        // Announce any relic earned from this fight — shown first, prominently.
-        // Stays up until the player taps anywhere to close it.
-        if let relic = engine.justEarnedRelic {
-            engine.justEarnedRelic = nil
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) {
-                earnedRelicBanner = relic
-            }
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                relicBannerContinuation = cont
-            }
-            withAnimation(.easeOut(duration: 0.3)) { earnedRelicBanner = nil }
-            try? await Task.sleep(for: .seconds(0.35))
-        }
-
+        await revealEarnedRelicIfAny()   // covers the dev-SKIP path
         // gameState stays .victory → the victory overlay (Next Stage / Restart) shows.
         engine.isResolvingTurn = false
     }
@@ -931,6 +1041,9 @@ struct ContentView: View {
                 try? await Task.sleep(for: .seconds(playerAnim))
                 clearVFX()
             }
+
+            // Reveal a relic the instant an elite died this turn (even mid-combat).
+            await revealEarnedRelicIfAny()
 
             // Combat may have ended on the player's turn.
             if engine.gameState == .victory {
