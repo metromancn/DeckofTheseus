@@ -54,7 +54,7 @@ struct Relic: Identifiable {
 
     static var vampireTooth: Relic {
         Relic(name: "Vampire Tooth",
-              description: "Heal 2 HP when you play an Attack card",
+              description: "50% chance to heal 2 HP when you play an Attack card.",
               iconName: "relic_vampire_tooth")
     }
 }
@@ -473,8 +473,9 @@ class GameEngine {
                 extraBlockNextTurn += card.blockNextTurn
             }
 
-            // Relic: Vampire Tooth (only when equipped) — heal 2 HP on a damaging card.
-            if card.damage > 0, equippedRelic?.name == "Vampire Tooth" {
+            // Relic: Vampire Tooth (only when equipped) — 50% chance to heal 2 HP
+            // whenever an Attack card is played.
+            if card.type == .attack, equippedRelic?.name == "Vampire Tooth", Bool.random() {
                 player.currentHp = min(player.maxHp, player.currentHp + 2)
             }
 
