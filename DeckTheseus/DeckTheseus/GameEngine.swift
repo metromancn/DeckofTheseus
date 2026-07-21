@@ -16,8 +16,9 @@ enum GameState {
     case playing
     case victory
     case defeat
-    case restSite      // Floor 3 — choose Heal or Draft
-    case drafting      // Floor 3 — pick a card to add to the deck
+    case restSite      // Rest floors — choose Heal or Draft
+    case drafting      // Rest floors — pick a card to add to the deck
+    case shop          // Between Floor 9 and Floor 10
     case actComplete   // "To Be Continued" placeholder between acts
 }
 
@@ -57,6 +58,13 @@ struct Relic: Identifiable {
               description: "50% chance to heal 2 HP when you play an Attack card.",
               iconName: "relic_vampire_tooth")
     }
+
+    /// Floor 11 elite reward — a defensive block relic.
+    static var mysteriousAmber: Relic {
+        Relic(name: "Mysterious Amber",
+              description: "Gain 6 Block at the start of combat. At the start of every 3rd turn, gain 5 Block.",
+              iconName: "relic_mysterious_amber")
+    }
 }
 
 struct Card: Identifiable {
@@ -71,11 +79,13 @@ struct Card: Identifiable {
     let isExhaustible: Bool
     let hitsAllEnemies: Bool     // AOE damage (Cleave)
     let energyNextTurn: Int      // extra energy next turn (Thunder)
-    let blockNextTurn: Int       // extra block next turn (Barricade)
+    let blockNextTurn: Int       // extra block next turn (generic next-turn block)
+    let permanentBlock: Bool     // Barricade — block stops resetting each turn (rest of combat)
 
     init(name: String, type: CardType, energyCost: Int, damage: Int, block: Int, imageName: String?,
          vulnerableApply: Int = 0, isExhaustible: Bool = false,
-         hitsAllEnemies: Bool = false, energyNextTurn: Int = 0, blockNextTurn: Int = 0) {
+         hitsAllEnemies: Bool = false, energyNextTurn: Int = 0, blockNextTurn: Int = 0,
+         permanentBlock: Bool = false) {
         self.name = name
         self.type = type
         self.energyCost = energyCost
@@ -87,6 +97,7 @@ struct Card: Identifiable {
         self.hitsAllEnemies = hitsAllEnemies
         self.energyNextTurn = energyNextTurn
         self.blockNextTurn = blockNextTurn
+        self.permanentBlock = permanentBlock
     }
 
     var description: String {
@@ -101,6 +112,7 @@ struct Card: Identifiable {
         if block > 0 { parts.append("Gain \(block) block.") }
         if energyNextTurn > 0 { parts.append("Gain \(energyNextTurn) energy next turn.") }
         if blockNextTurn > 0 { parts.append("Gain \(blockNextTurn) block next turn.") }
+        if permanentBlock { parts.append("Block no longer resets at the start of your turn.") }
         if isExhaustible { parts.append("Exhaust.") }
         return parts.joined(separator: " ")
     }
@@ -118,7 +130,7 @@ struct Card: Identifiable {
             Card(name: "Thunder", type: .attack, energyCost: 2, damage: 15, block: 0,
                  imageName: "card_thunder_attack", energyNextTurn: 1),
             Card(name: "Barricade", type: .skill, energyCost: 1, damage: 0, block: 8,
-                 imageName: "card_barricade_skill", blockNextTurn: 2),
+                 imageName: "card_barricade_skill", permanentBlock: true),
         ]
     }
 }
@@ -130,6 +142,7 @@ enum EnemyIntent {
     case gooSpit(slimeCount: Int)
     case harden(block: Int, strengthGain: Int)
     case defend(block: Int)
+    case attackDefend(damage: Int, block: Int)   // deals damage AND gains block
 
     var displayName: String {
         switch self {
@@ -137,6 +150,7 @@ enum EnemyIntent {
         case .gooSpit: return "Goo Spit"
         case .harden: return "Harden"
         case .defend: return "Defend"
+        case .attackDefend: return "Spike"
         }
     }
 
@@ -146,6 +160,7 @@ enum EnemyIntent {
         case .gooSpit(let count): return "×\(count)"
         case .harden(let blk, _): return "\(blk)"
         case .defend(let blk): return "\(blk)"
+        case .attackDefend(let dmg, _): return "\(dmg + strength)"
         }
     }
 }
@@ -158,7 +173,7 @@ class Player {
     var currentHp = 80
     var maxEnergy = 3
     var currentEnergy = 3
-    var gold = 99
+    var gold = 0
     var currentBlock = 0
 }
 
@@ -187,10 +202,14 @@ class Enemy: Identifiable {
 
     // Relic awarded to the player when this enemy dies (Elites drop relics).
     let dropsRelic: Relic?
+    var relicRolled = false   // guards against re-rolling the drop each frame
+
+    // Gold this enemy contributes to the combat reward (Normal 15 / Elite 30 / Boss 100).
+    let goldReward: Int
 
     init(name: String, maxHp: Int, spriteName: String,
          spriteContentW: CGFloat, spriteContentH: CGFloat, rotation: [EnemyIntent],
-         spriteScale: CGFloat = 1.0, dropsRelic: Relic? = nil) {
+         spriteScale: CGFloat = 1.0, dropsRelic: Relic? = nil, goldReward: Int = 15) {
         self.name = name
         self.maxHp = maxHp
         self.currentHp = maxHp
@@ -201,6 +220,7 @@ class Enemy: Identifiable {
         self.rotation = rotation
         self.nextMove = rotation.first ?? .tackle(baseDamage: 0)
         self.dropsRelic = dropsRelic
+        self.goldReward = goldReward
     }
 
     var isAlive: Bool { currentHp > 0 }
@@ -214,38 +234,47 @@ class Enemy: Identifiable {
         nextMove = rotation[(turn - 1) % rotation.count]
     }
 
-    // MARK: - Enemy factories
+    // MARK: - Enemy factories (Act 1 — Slime Biome)
 
-    /// Floor 1 — standard slime (small).
-    static func basicOoze() -> Enemy {
+    /// Normal — a plain slime that attacks for 6.
+    static func slime() -> Enemy {
         Enemy(name: "Slime", maxHp: 40, spriteName: "enemy_slime_basic",
               spriteContentW: 0.453, spriteContentH: 0.375,
-              rotation: [.tackle(baseDamage: 6), .defend(block: 5)],
+              rotation: [.tackle(baseDamage: 6)],
               spriteScale: 0.5)
     }
 
-    /// Floor 2 Elite — alternates a 10-damage attack and a 10 block defend.
-    /// Drops the Vampire Tooth relic the moment it dies.
+    /// Normal — glass-cannon slime: hits for 10, then blocks 3.
+    static func redSlime() -> Enemy {
+        Enemy(name: "Red Slime", maxHp: 20, spriteName: "enemy_red_slime_basic",
+              spriteContentW: 0.453, spriteContentH: 0.375,
+              rotation: [.tackle(baseDamage: 10), .defend(block: 3)],
+              spriteScale: 0.5)
+    }
+
+    /// Elite (Floor 5) — attacks for 10, then blocks 15. Drops Vampire Tooth.
     static func acidSlime() -> Enemy {
         Enemy(name: "Acid Slime", maxHp: 60, spriteName: "enemy_acid_slime_elite",
               spriteContentW: 0.453, spriteContentH: 0.375,
-              rotation: [.tackle(baseDamage: 10), .defend(block: 10)],
-              spriteScale: 0.78, dropsRelic: .vampireTooth)
+              rotation: [.tackle(baseDamage: 10), .defend(block: 15)],
+              spriteScale: 0.78, dropsRelic: .vampireTooth, goldReward: 30)
     }
 
-    /// Floor 2 — second (small) slime.
-    static func basicSlime() -> Enemy {
-        Enemy(name: "Slime", maxHp: 40, spriteName: "enemy_slime_basic",
-              spriteContentW: 0.453, spriteContentH: 0.375,
-              rotation: [.tackle(baseDamage: 9), .defend(block: 6), .tackle(baseDamage: 6)],
-              spriteScale: 0.5)
+    /// Elite (Floor 11) — attacks for 8, then hits 5 while gaining 10 block.
+    /// Drops the Mysterious Amber relic.
+    static func spikedSlime() -> Enemy {
+        Enemy(name: "Spiked Slime", maxHp: 80, spriteName: "enemy_spiked_slime_elite",
+              spriteContentW: 0.453, spriteContentH: 0.438,
+              rotation: [.tackle(baseDamage: 8), .attackDefend(damage: 5, block: 10)],
+              spriteScale: 0.65, dropsRelic: .mysteriousAmber, goldReward: 30)
     }
 
-    /// Floor 4 — the Act boss.
+    /// Boss (Floor 15) — the Act boss.
     static func slimeKing() -> Enemy {
         Enemy(name: "Slime King", maxHp: 160, spriteName: "boss_slime",
               spriteContentW: 0.61, spriteContentH: 0.578,
-              rotation: [.tackle(baseDamage: 12), .gooSpit(slimeCount: 2), .harden(block: 15, strengthGain: 2)])
+              rotation: [.tackle(baseDamage: 12), .gooSpit(slimeCount: 2), .harden(block: 15, strengthGain: 2)],
+              goldReward: 100)
     }
 }
 
@@ -315,36 +344,36 @@ class GameEngine {
     var currentAct = 1
     var currentFloor = 1
 
+    // Gold rewards. `clearedFloors` tracks which floors have been won so the
+    // first-win bonus is only granted once per floor. `lastGoldEarned` /
+    // `lastFirstWinBonus` feed the victory screen's reward breakdown.
+    var clearedFloors: Set<Int> = []
+    var lastGoldEarned = 0
+    var lastFirstWinBonus = 0
+
     // Next-turn buffs (applied at the start of the player's turn)
     var extraEnergyNextTurn: Int = 0
     var extraBlockNextTurn: Int = 0
 
-    // Relics — the player owns many but only one is equipped (active).
+    // When true (Barricade played this combat), block stops resetting each turn.
+    var blockPersists = false
+
+    // Relics — every relic the player owns is active (there is no equip/unequip).
     var playerRelics: [Relic] = []
-    var equippedRelicId: UUID? = nil
-    var justEarnedRelic: Relic? = nil   // set when a relic is awarded, for the UI banner
+    var justEarnedRelic: Relic? = nil        // set when a relic is awarded, for the UI banner
 
     func hasRelic(named name: String) -> Bool {
         playerRelics.contains { $0.name == name }
     }
 
-    var equippedRelic: Relic? {
-        guard let id = equippedRelicId else { return nil }
-        return playerRelics.first { $0.id == id }
-    }
-
-    /// Equip the relic, or unequip it if it's already the equipped one.
-    func toggleEquip(_ id: UUID) {
-        equippedRelicId = (equippedRelicId == id) ? nil : id
-    }
-
-    /// Award relics for any enemy that just died carrying one. Auto-equips the
-    /// first relic earned so its effect is active immediately.
-    private func checkRelicDrops() {
-        for enemy in enemies where !enemy.isAlive {
-            guard let relic = enemy.dropsRelic, !hasRelic(named: relic.name) else { continue }
+    /// Grant the relics carried by this floor's elites. Called once the whole floor is
+    /// cleared (not the instant an elite dies), so the reward lands with the victory.
+    /// All relics currently drop at 100%, are added active, and duplicates are kept.
+    private func grantFloorRelics() {
+        for enemy in enemies {
+            guard let relic = enemy.dropsRelic, !enemy.relicRolled else { continue }
+            enemy.relicRolled = true
             playerRelics.append(relic)
-            if equippedRelicId == nil { equippedRelicId = relic.id }
             justEarnedRelic = relic
         }
     }
@@ -395,10 +424,7 @@ class GameEngine {
     }
 
     init() {
-        deck.initializeDeck()
-        currentAct = 1
-        currentFloor = 1
-        startFloorCombat()
+        startGame()
     }
 
     func canAfford(_ card: Card) -> Bool {
@@ -420,15 +446,31 @@ class GameEngine {
     // MARK: - Combat Resolution
 
     private func checkCombatResolution() {
+        guard gameState == .playing else { return }   // resolve only once per combat
         // A combat is "won" once every enemy is at 0 HP. The floor logic (auto-
         // advance vs. terminal victory) is decided by the turn orchestrator.
-        // (Relics are awarded on the individual enemy's death via checkRelicDrops.)
         if allEnemiesDead {
+            awardCombatRewards()
             gameState = .victory
         } else if player.currentHp <= 0 {
             player.currentHp = 0
             gameState = .defeat
         }
+    }
+
+    /// Grant the rewards for the just-won floor: gold (15/30/100 per Normal/Elite/Boss,
+    /// plus a one-time +15 first-clear bonus) and any relics the floor's elites carry.
+    /// Records the gold breakdown for the victory screen.
+    private func awardCombatRewards() {
+        let base = enemies.reduce(0) { $0 + $1.goldReward }
+        let firstWin = !clearedFloors.contains(currentFloor)
+        let bonus = firstWin ? 15 : 0
+        clearedFloors.insert(currentFloor)
+        player.gold += base + bonus
+        lastGoldEarned = base
+        lastFirstWinBonus = bonus
+
+        grantFloorRelics()
     }
 
     /// Vulnerable multiplier: each stack adds +50% damage (2 stacks = +100%).
@@ -472,18 +514,23 @@ class GameEngine {
             if card.blockNextTurn > 0 {
                 extraBlockNextTurn += card.blockNextTurn
             }
+            if card.permanentBlock {
+                blockPersists = true   // Barricade — block stops resetting for the rest of combat
+            }
 
-            // Relic: Vampire Tooth (only when equipped) — 50% chance to heal 2 HP
+            // Relic: Vampire Tooth (when owned) — 50% chance to heal 2 HP
             // whenever an Attack card is played.
-            if card.type == .attack, equippedRelic?.name == "Vampire Tooth", Bool.random() {
+            if card.type == .attack, hasRelic(named: "Vampire Tooth"), Bool.random() {
                 player.currentHp = min(player.maxHp, player.currentHp + 2)
             }
 
-            checkRelicDrops()   // award a relic the instant an elite dies
-            retargetIfNeeded()
-            checkCombatResolution()
+            checkCombatResolution()   // grants relics once the whole floor is cleared
             if gameState != .playing { break }
         }
+        // Retarget only AFTER the whole selection resolves, so overkill on a single
+        // target is wasted (not redirected to another enemy mid-cast). This just keeps
+        // the reticle on a living enemy for next turn.
+        retargetIfNeeded()
         player.currentEnergy -= usedEnergy
         deck.hand.removeAll { selectedCardIds.contains($0.id) }
 
@@ -499,17 +546,25 @@ class GameEngine {
 
     // MARK: - Enemy Turn
 
+    /// Apply `raw` damage to the player, absorbed by block first, HP clamped.
+    private func dealDamageToPlayer(_ raw: Int) {
+        let remaining = raw - player.currentBlock
+        player.currentBlock = max(0, player.currentBlock - raw)
+        if remaining > 0 {
+            player.currentHp = max(0, player.currentHp - remaining)
+        }
+    }
+
     private func executeEnemyTurn() {
         // Every living enemy executes its queued move.
         for enemy in enemies where enemy.isAlive {
+            // Block earned last turn expires at the start of this enemy turn (it
+            // already absorbed the player's attacks). Mirrors the player's reset.
+            enemy.currentBlock = 0
+
             switch enemy.nextMove {
             case .tackle(let baseDamage):
-                let totalDamage = baseDamage + enemy.strength
-                let remaining = totalDamage - player.currentBlock
-                player.currentBlock = max(0, player.currentBlock - totalDamage)
-                if remaining > 0 {
-                    player.currentHp = max(0, player.currentHp - remaining)
-                }
+                dealDamageToPlayer(baseDamage + enemy.strength)
 
             case .gooSpit(let count):
                 var slimeCards: [Card] = []
@@ -527,6 +582,10 @@ class GameEngine {
 
             case .defend(let block):
                 enemy.currentBlock += block
+
+            case .attackDefend(let damage, let block):
+                dealDamageToPlayer(damage + enemy.strength)
+                enemy.currentBlock += block
             }
 
             checkCombatResolution()
@@ -536,23 +595,19 @@ class GameEngine {
 
     // MARK: - End Turn
 
+    /// Synchronous end-of-turn (no animation). Delegates to the same granular steps
+    /// the view's orchestrator uses, so block reset, relics, and buffs stay in one place.
     func endTurn() {
         guard gameState == .playing else { return }
 
         playSelectedCards()
         if gameState != .playing { return }
 
-        while !deck.hand.isEmpty {
-            deck.discardPile.append(deck.hand.removeLast())
-        }
-
-        executeEnemyTurn()
+        discardHand()
+        runEnemyTurn()
         if gameState != .playing { return }
 
-        player.currentEnergy = player.maxEnergy
-        currentTurn += 1
-        for enemy in enemies { enemy.advanceIntent(forTurn: currentTurn) }
-        deck.drawCards(5)
+        beginNextTurn()
     }
 
     // MARK: - Granular Turn Steps (for animated orchestration)
@@ -573,6 +628,11 @@ class GameEngine {
     /// Refresh energy, apply next-turn buffs, advance the intents, and draw.
     func beginNextTurn() {
         guard gameState == .playing else { return }
+        // Block resets at the start of the player's turn, unless made permanent (Barricade).
+        // (It survived the enemy turn, so incoming attacks were already absorbed.)
+        if !blockPersists {
+            player.currentBlock = 0
+        }
         // Start-of-turn buffs/debuffs (energy clamped so it never goes below 0).
         player.currentBlock += extraBlockNextTurn
         player.currentEnergy = max(0, player.maxEnergy + extraEnergyNextTurn)
@@ -581,12 +641,23 @@ class GameEngine {
 
         currentTurn += 1
         for enemy in enemies { enemy.advanceIntent(forTurn: currentTurn) }
+
+        // Relic: Mysterious Amber — gain 5 Block at the start of every 3rd turn.
+        if currentTurn % 3 == 0, hasRelic(named: "Mysterious Amber") {
+            player.currentBlock += 5
+        }
+
         deck.drawCards(5)
     }
 
     // Detection helpers for choosing which VFX to play.
     var selectedDealsDamage: Bool {
         deck.hand.contains { selectedCardIds.contains($0.id) && $0.damage > 0 }
+    }
+
+    /// A selected damage card hits every enemy (Cleave) — so the hit VFX plays on all of them.
+    var selectedAttackHitsAll: Bool {
+        deck.hand.contains { selectedCardIds.contains($0.id) && $0.damage > 0 && $0.hitsAllEnemies }
     }
 
     var selectedGivesBlock: Bool {
@@ -597,8 +668,10 @@ class GameEngine {
     var anyEnemyAttacks: Bool {
         enemies.contains { enemy in
             guard enemy.isAlive else { return false }
-            if case .tackle = enemy.nextMove { return true }
-            return false
+            switch enemy.nextMove {
+            case .tackle, .attackDefend: return true
+            default: return false
+            }
         }
     }
 
@@ -611,47 +684,37 @@ class GameEngine {
         }
     }
 
-    /// Indices of living enemies whose queued move is a self-buff (defend/harden).
+    /// Indices of living enemies whose queued move gains block (defend/harden/spike).
     var buffingEnemyIndices: [Int] {
         enemies.indices.filter { i in
             let enemy = enemies[i]
             guard enemy.isAlive else { return false }
             switch enemy.nextMove {
-            case .harden, .defend: return true
+            case .harden, .defend, .attackDefend: return true
             default: return false
             }
         }
     }
 
-    // MARK: - Progression
+    // MARK: - Progression (15-floor Act 1)
 
     func nodeForFloor(_ floor: Int) -> FloorNode {
         switch floor {
-        case 1: return .combat
-        case 2: return .elite
-        case 3: return .rest
-        case 4: return .boss
-        default: return .combat
+        case 4, 9, 14: return .rest
+        case 5, 11:    return .elite
+        case 15:       return .boss
+        default:       return .combat
         }
     }
 
-    var isBossFloor: Bool { nodeForFloor(currentFloor) == .boss }
+    var isBossFloor: Bool { currentFloor == 15 }
 
-    private func spawnEnemies(for node: FloorNode) -> [Enemy] {
-        switch node {
-        case .combat: return [.basicOoze()]
-        case .elite:  return [.acidSlime(), .basicSlime()]
-        case .boss:   return [.slimeKing()]
-        case .rest:   return []
-        }
-    }
+    /// Rest floors allow drafting except Floor 14 (heal only).
+    var restDraftAllowed: Bool { currentFloor != 14 }
 
-    /// Set up (or reset) the combat encounter for the current floor. Player HP is
-    /// left untouched so it can carry over between floors — callers that want a
-    /// full reset (dev retry) restore it themselves before calling this.
-    func startFloorCombat() {
-        let node = nodeForFloor(currentFloor)
-        enemies = spawnEnemies(for: node)
+    /// Spawn a combat encounter and reset per-fight state (player HP carries over).
+    private func startCombat(with newEnemies: [Enemy]) {
+        enemies = newEnemies
         targetIndex = 0
         for enemy in enemies { enemy.advanceIntent(forTurn: 1) }
 
@@ -659,6 +722,13 @@ class GameEngine {
         player.currentEnergy = player.maxEnergy
         extraEnergyNextTurn = 0
         extraBlockNextTurn = 0
+        blockPersists = false
+
+        // Relic: Mysterious Amber — gain 6 Block at the start of combat (relics are only
+        // earned after a floor is cleared, so owning Amber here means it's already active).
+        if hasRelic(named: "Mysterious Amber") {
+            player.currentBlock += 6
+        }
 
         deck.startCombat()   // reshuffle masterDeck into drawPile, clear temp piles
         deck.drawCards(5)
@@ -671,36 +741,93 @@ class GameEngine {
         gameState = .playing
     }
 
-    /// Load whatever node the current floor points at (combat or rest site).
-    private func loadCurrentFloor() {
-        switch nodeForFloor(currentFloor) {
-        case .rest:
+    /// Configure whatever the current floor is. Encounters are FIXED per floor and
+    /// hand-tuned into a fair difficulty curve for a fresh run:
+    ///   • Floors 1–3 use only the starter deck — kept gentle, one teaching idea each.
+    ///   • The player drafts a card at Floor 4, so Floors 6–8 introduce real threats.
+    ///   • A second draft (Floor 9) + the Shop precede the harder Floors 10–13.
+    /// (Slime = tanky/40 HP/6 dmg; Red Slime = fragile/20 HP/10 dmg burst.)
+    private func setupCurrentFloor() {
+        switch currentFloor {
+        // Pre-draft: gentle introduction.
+        case 1:  startCombat(with: [.slime()])                          // basics: one target
+        case 2:  startCombat(with: [.slime(), .slime()])               // multi-target basics
+        case 3:  startCombat(with: [.slime(), .redSlime()])            // focus the dangerous target
+
+        case 4, 9, 14:   // Rest Sites
+            enemies = []
             gameState = .restSite
-        default:
-            startFloorCombat()
+
+        case 5:  startCombat(with: [.acidSlime(), .slime()])           // Elite 1
+
+        // After the first draft: real threats.
+        case 6:  startCombat(with: [.redSlime(), .redSlime()])         // burst check (20 dmg/turn)
+        case 7:  startCombat(with: [.slime(), .slime(), .slime()])     // endurance wall (rewards AOE)
+        case 8:  startCombat(with: [.slime(), .slime(), .redSlime()])  // mixed, sustained
+
+        // After the second draft + Shop: high threat.
+        case 10: startCombat(with: [.slime(), .redSlime(), .redSlime()]) // high burst (26 dmg/turn)
+
+        case 11: startCombat(with: [.spikedSlime(), .slime(), .slime()]) // Elite 2
+
+        case 12: startCombat(with: [.slime(), .slime(), .slime()])     // grind breather after the elite
+        case 13: startCombat(with: [.redSlime(), .redSlime(), .redSlime()]) // final gauntlet (30 dmg/turn)
+
+        case 15: startCombat(with: [.slimeKing()])                     // Boss
+
+        case 16:         // Run complete
+            enemies = []
+            gameState = .actComplete
+
+        default: startCombat(with: [.slime()])   // safety fallback (unreached)
         }
     }
 
-    /// Advance one floor and load its node (combat or rest site).
-    func advanceToNextFloor() {
+    /// Advance to the next floor and configure it.
+    func advanceFloor() {
         currentFloor += 1
-        loadCurrentFloor()
+        // A Shop sits between Floor 9 and Floor 10 — visit it before Floor 10's combat.
+        if currentFloor == 10 {
+            enemies = []
+            gameState = .shop
+            return
+        }
+        setupCurrentFloor()
     }
 
-    /// Terminal boss victory → move on to the next act (placeholder for now).
-    func advanceToNextAct() {
-        currentAct += 1
+    /// Leave the shop and start Floor 10's combat.
+    func leaveShop() {
+        setupCurrentFloor()   // currentFloor is already 10
+    }
+
+    /// Start a brand-new run from Act 1, Floor 1 (Slay-the-Spire style): full HP,
+    /// gold and relics wiped, deck back to the 10-card starter, first-win history
+    /// cleared. Used at launch and by the "Try Again" button.
+    func startGame() {
+        player.currentHp = player.maxHp
+        player.currentBlock = 0
+        player.gold = 0
+
+        playerRelics = []
+        justEarnedRelic = nil
+        clearedFloors = []
+        lastGoldEarned = 0
+        lastFirstWinBonus = 0
+
+        deck.initializeDeck()   // drop drafted cards, back to the starter deck
+
+        currentAct = 1
         currentFloor = 1
-        gameState = .actComplete
+        setupCurrentFloor()
     }
 
-    // MARK: - Rest Site (Floor 3)
+    // MARK: - Rest Site
 
-    /// "Rest" — heal 30% of max HP (clamped), then head to Floor 4.
+    /// "Rest" — heal 30% of max HP (clamped), then advance.
     func restHealAndAdvance() {
         let healAmount = Int(Double(player.maxHp) * 0.30)
         player.currentHp = min(player.maxHp, player.currentHp + healAmount)
-        advanceToNextFloor()
+        advanceFloor()
     }
 
     /// "Train" — open the card draft.
@@ -708,39 +835,26 @@ class GameEngine {
         gameState = .drafting
     }
 
-    /// Draft — add exactly one copy of `card` to the master deck, then Floor 4.
-    /// Guarded so a double-fired tap can't add the card twice.
+    /// Draft — add one copy of `card` to the master deck (duplicates allowed), then advance.
     func draftCard(_ card: Card) {
         guard gameState == .drafting else { return }
         deck.masterDeck.append(card)
-        advanceToNextFloor()
+        advanceFloor()
     }
 
-    /// Draft — skip the reward and head to Floor 4.
+    /// Draft — skip the reward and advance.
     func skipDraft() {
         guard gameState == .drafting else { return }
-        advanceToNextFloor()
+        advanceFloor()
     }
 
-    /// DEV ONLY — instantly kill every enemy so the round resolves as a normal win
-    /// (awards the floor's relic, triggers the relic reveal + victory screen).
+    /// DEV ONLY — instantly kill every enemy so the round resolves as a normal win.
     func devWinCombat() {
         for enemy in enemies { enemy.currentHp = 0; enemy.vfx = .none }
         turnBanner = .none
         playerVFX = .none
         isResolvingTurn = true   // suppress the overlay until the win sequence finishes
-        checkRelicDrops()        // award drops for the enemies we just killed
+        awardCombatRewards()     // gold + relics for the skipped floor
         gameState = .victory
-    }
-
-    // MARK: - Restart (dev-mode retry of the exact current fight)
-
-    func restartCombat() {
-        // Full reset of health pools for a clean re-attempt of the same floor.
-        player.currentHp = player.maxHp
-        // Reuse the floor-combat setup (reshuffles masterDeck, resets enemy,
-        // energy, block, turn/VFX state) without touching currentFloor/currentAct
-        // or the masterDeck itself.
-        startFloorCombat()
     }
 }

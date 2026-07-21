@@ -1,89 +1,194 @@
-# Vibe-Coding Master Design Document: Deck of Theseus
+# Deck of Theseus — Design Document (Current Build)
 
-## 1. Global Architecture & Visual Style
-* **Genre:** Roguelike Deckbuilder.
-* **Visual Style:** Programmatic Pixel Art. The AI must render all graphics using 2D arrays on an HTML5 `<canvas>` (e.g., a 16x16 grid system with a fixed 16-color retro palette). No external PNGs or JPEGs.
-* **UI Framework:** Single Page Application (SPA) using clean CSS Flexbox and Grid. Screens are toggled using `display: none`.
+> This document describes the game **as it is currently implemented**. Sections tagged
+> _(planned)_ are part of the long-term vision but not yet built. The original concept
+> targeted an HTML5-canvas web app; the shipped game is a native **SwiftUI** app, so this
+> spec has been rewritten to match reality.
 
-## 2. Core State Variables (The Engine)
-The AI must maintain these variables globally:
-* **Player State:** `hp`, `maxHp` (starts at 80), `energy` (starts at 3 per turn, resets every turn), `gold` (starts at 99).
-* **Deck State:** Four arrays: `masterDeck` (all owned cards), `drawPile`, `discardPile`, and `hand` (max 5 cards).
-* **Status Effects:** Integers tracking durations or stacks (e.g., `vulnerableStacks`, `poisonStacks`, `block`).
-* **Global Tracker:** `totalTurns` (increments every time the player clicks "End Turn" to track for the Global Leaderboard).
+## 1. Architecture & Visual Style
+* **Genre:** Roguelike Deckbuilder (Slay-the-Spire style).
+* **Platform:** Native **SwiftUI** app (runs on iOS and macOS).
+* **State:** The `@Observable` macro (Observation framework) drives all reactive state —
+  `GameEngine`, `Player`, `Enemy`, `DeckManager`. No Redux/canvas game loop.
+* **Visual Style:** Hand-authored **pixel-art PNG assets** in the Xcode asset catalog
+  (sprites, cards, hearts, orbs, relics, VFX frames) — *not* programmatically drawn.
+  Sprites live on a 64px transparent canvas and are trimmed at render time by a
+  `CroppedSprite` view (double-frame + clip using measured content bounds).
+* **Font:** `VT323` retro pixel font, registered at runtime in `DeckTheseusApp`.
+* **Key files:** `GameEngine.swift` (all state + logic), `ContentView.swift` (all UI),
+  `DeckTheseusApp.swift` (app entry + font registration).
 
-## 3. The UI Screens & Layouts
-### A. The Map Screen (Stages)
-* **Layout:** Vertical scrolling container. Nodes branch upwards from bottom to top, connected by SVG lines. You can only click nodes connected to your current location.
-* **Node Types:** ⚔️ Normal Fight, 💀 Elite Fight, ⛺ Rest Site, 💰 Shop.
+## 2. Core State (The Engine)
+* **Player:** `maxHp`/`currentHp` (start 80), `maxEnergy`/`currentEnergy` (3, refreshed each
+  turn), `currentBlock`, `gold` (**starts at 0**).
+* **Deck (`DeckManager`):** five arrays — `masterDeck`, `drawPile`, `discardPile`,
+  `exhaustPile`, `hand`.
+* **Relics:** `playerRelics` (owned), one `equippedRelicId` active at a time.
+* **Progression:** `currentAct`, `currentFloor`.
+* **Gold rewards:** `clearedFloors` (which floors have been won — gates the first-win bonus),
+  plus `lastGoldEarned` / `lastFirstWinBonus` for the victory-screen breakdown.
+* **Turn buffs:** `extraEnergyNextTurn` (Thunder), `blockPersists` (Barricade — stops block
+  resetting), `amberBlockCountdown` (Mysterious Amber's delayed mid-combat block).
 
-### B. The Combat Screen
-* **Top (Status Bar):** Player HP (`[██████░░] 60/80`), Gold (`💰 150`), Floor Number, and a row of collected Relic icons.
-* **Middle (The Arena):** The HTML5 Canvas. Player sprite on the left, Enemy sprite on the right. Above the enemy is the Intent Icon (e.g., ⚔️ 12) showing their exact next move.
-* **Bottom (Control Deck):** Energy counter, Draw Pile count. Center area contains the Hand (horizontal row of clickable card `div`s that pop up on hover). Far right has an "END TURN" button and Discard Pile count.
+## 3. UI Screens & Layout
+### Combat Screen (the main view)
+* **Top-left HUD:** Act-Floor number, Turn counter, and a **gold** indicator
+  (placeholder coin icon + amount owned).
+* **Player** on the left, **enemies clustered on the right** (tight spacing so multi-enemy
+  fights stay out of the player's side of the arena).
+* Each combatant shows a name, sprite (aligned to a shared ground line), a row of **hearts**
+  (each heart = 20 HP; full / half / empty art), and a **shield** icon when block > 0.
+* **Enemy intent** is telegraphed above/next to each enemy (move name + value).
+* **Target reticle** (▼) marks the currently targeted enemy; tap any enemy sprite to retarget.
+* **Bottom bar:** draw-pile count + face-down pile (left); a fanned **hand** of cards (center)
+  that lifts/highlights on select and shows a **tooltip** on hold; energy orb, relic bar, and
+  **END TURN** button (right).
+* **Dev SKIP button** (top-right) — instantly wins the current combat (for testing).
 
-### C. The Shop Screen
-* **Layout:** Pixel-art shopkeeper and dialogue box at the top. A 3x2 CSS Grid for the inventory. A "Leave Shop" button at the bottom.
+### Result Screens (Victory / Defeat)
+Victory and Defeat share one full-screen layout: the **Act-Floor number** above a **title
+banner**, the hero sprite centered, a **rewards bar**, and a right-aligned row of buttons.
+* **Victory** — gold "VICTORY" title; the rewards bar shows the gold earned, with the
+  **first-win bonus** chip (carrying a "First Win" bubble) in front of the normal gold chip;
+  buttons **Try Again · Exit · Next Stage**.
+* **Defeat** — red "DEFEAT" title; **empty** rewards bar; buttons **Try Again · Exit**.
+* **Exit** is a no-op for now (reserved to return to the Map once mapping exists). **Try Again**
+  restarts the current fight; **Next Stage** advances.
+
+### Other Overlays
+* **Rest Site** — see §7.
+* **Card Draft** — tap a card to highlight, then **SELECT CARD**.
+* **Shop** — placeholder screen with a **LEAVE SHOP** button (see §6).
+* **Act Complete** — end-of-run screen after the boss.
+* **Relic reveal banner** — pops the moment an elite drops a relic ("tap anywhere to close").
+
+### Map screen — _(planned)_
+Progression is currently **linear** (no branching map).
 
 ## 4. The Game Loop
-The game consists of **3 Acts**, each with **15 Floors**.
-* **Floors 1-14:** Choose a path on the Map screen.
-    * *Normal Fight:* Rewards Gold and 1 Card Draft (choose 1 of 3).
-    * *Elite Fight:* Rewards Gold, 1 Card Draft, and 1 Relic.
-    * *Rest Site:* Choose to Heal 30% of Max HP **OR** Upgrade a card.
-    * *Shop:* Spend Gold.
-* **Floor 15 (Boss):** Massive encounter. Rewards full heal, a Boss Relic, and advances to the next Act.
+The full game is envisioned as **3 Acts × 15 Floors**. **Act 1 (the Slime Biome) is fully
+implemented**; Acts 2–3 are _(planned)_. Encounters are **fixed per floor** (hand-tuned into a
+fair difficulty curve — no randomness), configured by `setupCurrentFloor()`:
 
-## 5. Combat Mechanics & Rules
-* **Drawing:** Draw 5 cards at the start of the turn.
-* **Discarding:** At the end of the turn, *all* cards (played and unplayed) go to the discard pile. Block resets to 0.
-* **Reshuffling:** When `drawPile` is empty, shuffle `discardPile` and move it to `drawPile`.
-* **Math (Use integer flooring `Math.floor()` to prevent decimals):**
-    * *Vulnerable:* Target takes 50% more damage.
-    * *Weak:* Target deals 25% less damage.
+| Floor | Type | Encounter | Notes |
+|------:|------|-----------|-------|
+| 1 | Beginner combat | 1 Slime | Tutorial: single target |
+| 2 | Combat | 2 Slimes | Multi-target basics |
+| 3 | Combat | 1 Slime + 1 Red Slime | Focus the dangerous target |
+| 4 | **Rest Site** | Heal or draft (1st card) | |
+| 5 | **Elite 1** | Acid Slime + 1 Slime | Drops **Vampire Tooth** |
+| 6 | Combat | 2 Red Slimes | Burst check |
+| 7 | Combat | 3 Slimes | Endurance wall (rewards AOE) |
+| 8 | Combat | 2 Slimes + 1 Red Slime | Mixed, sustained |
+| 9 | **Rest Site** | Heal or draft (2nd card) | |
+| — | **Shop** | Between Floors 9 and 10 | Placeholder |
+| 10 | Combat | 1 Slime + 2 Red Slimes | High burst |
+| 11 | **Elite 2** | Spiked Slime + 2 Slimes | Drops **Mysterious Amber** |
+| 12 | Combat | 3 Slimes | Grind breather after the elite |
+| 13 | Combat | 3 Red Slimes | Final gauntlet (max burst) |
+| 14 | **Rest Site** | Heal only (no draft) | Top off for the boss |
+| 15 | **Boss** | Slime King | Act finale |
+| 16 | Run complete | "Act 1 Complete" screen | |
 
-## 6. Cards & Archetypes
-**Starter Deck (10 Cards):**
-* 5x Strike (1 Energy, 6 Damage)
-* 4x Defend (1 Energy, 5 Block)
-* 1x Bash (2 Energy, 8 Damage + Apply 2 Vulnerable)
+The difficulty ramps in step with the player's power spikes: Floors 1–3 use only the starter
+deck; the jumps to 2- and 3-enemy fights land *after* the draft rooms (4, 9) and the Shop.
 
-**Draft Archetypes (Examples to build around):**
-* **The Juggernaut:** Uses Block as a weapon. (e.g., *Barricade*: Block no longer resets. *Shield Slam*: Deal damage equal to current Block).
-* **The Venom:** Exponential damage over time. (e.g., *Poison Stab*: Apply Poison. *Catalyst*: Double enemy's current Poison stacks).
+## 5. Combat Mechanics
+* **Turn start:** draw **5 cards**; energy refreshed to `maxEnergy` (± next-turn modifiers).
+* **Playing cards:** select any affordable cards, then END TURN plays them in order. Energy
+  is spent per card; unaffordable cards can't be selected.
+* **End of turn:** all remaining hand cards are discarded, then every living enemy executes
+  its telegraphed move.
+* **Block:** absorbs incoming damage like temporary HP, shown as a shield.
+  Block **resets to 0 at the start of each side's own turn** — the player's at the start of
+  their turn, an enemy's at the start of its turn. Because the reset happens *after* the
+  opponent's turn, block always gets to absorb the incoming attacks first. **Barricade** makes
+  the player's block stop resetting for the rest of that combat.
+* **Reshuffling:** when `drawPile` empties, the `discardPile` is shuffled back into it.
+* **Exhaust:** exhaustible cards (e.g., the Slime status card) go to the `exhaustPile` when
+  played and don't return this combat.
+* **Damage math:** `floor(baseDamage × vulnerableMultiplier)`, then block absorbs the rest.
+* **Targeting:** single-target cards hit the reticle'd enemy; **Cleave** hits **all** enemies.
+* **Victory** when every enemy is at 0 HP; **Defeat** when the player hits 0 HP.
 
-## 7. The Shop Economy
-The shop always sells exactly 6 items:
-1.  **Common Card:** 50 Gold
-2.  **Uncommon Card:** 75 Gold
-3.  **Rare Card:** 150 Gold
-4.  **Common Relic:** 150 Gold
-5.  **Rare Relic:** 250 Gold
-6.  **Card Removal Service:** 75 Gold (Lets player permanently delete 1 card from `masterDeck`. Price increases by +25 Gold every time it is used).
+### Status Effects
+* **Vulnerable:** target takes **+50% damage per stack** (2 stacks = +100%). It **persists**
+  (does not tick down each turn) and applies to *future* attacks; the boss's Harden clears it.
+* **Strength:** enemy stat that adds flat damage to attacks (boss gains it via Harden).
+* **Energy drain:** Goo Spit reduces next turn's energy by 1 (clamped ≥ 0).
 
-## 8. The Relic System
-Relics are passive modifiers.
-* **Combat Starter:** e.g., *Rusty Anchor* (Start combat with +10 Block).
-* **Synergy Relic:** e.g., *Viper's Fang* (Adds +1 to all Poison applied).
-* **Boss Relic:** e.g., *Cursed Chalice* (+1 Energy per turn, but Rest Sites no longer heal).
-* **Edge Case Safety (Consumable Payout):** If the `relicPool` array is empty when a player defeats an Elite, the game MUST NOT crash. Instead, trigger a Consumable Payout: `player.gold += 150` and `player.maxHp += 5`.
+## 6. Gold & Shop
+* **Gold rewards** (granted on combat victory, including the dev SKIP):
+  * per enemy — **Normal 15**, **Elite 30**, **Boss 100** (summed across the encounter).
+  * **+15 first-win bonus** the first time each floor is cleared (replays give base gold only).
+* **Shop** — sits between Floor 9 and Floor 10. Reached automatically after leaving the Floor-9
+  rest site; **LEAVE SHOP** starts Floor 10's combat. Currently a **placeholder** with no
+  wares — inventory/economy _(planned)_.
 
-## 9. Act 1 Boss: The Slime King
-* **Stats:** 140 HP. Visual: 16x16 pulsing green blob.
-* **Intent Pattern (Loops infinitely):**
-    1.  *Turn 1 (Tackle):* Deals 12 direct damage.
-    2.  *Turn 2 (Goo Spit):* Adds 2 "Slime" status cards into the player's *discard pile*. (Slime Card: Useless card that costs 1 Energy just to remove from your hand).
-    3.  *Turn 3 (Harden):* Boss gains 15 Block and clears all Poison/Debuffs.
+## 7. Rest Site (Floors 4, 9, 14)
+* **Rest** — heal **30% of max HP** (always available).
+* **Train** — open a **card draft**: pick 1 of **Cleave / Thunder / Barricade** to add a copy
+  to your master deck. Duplicates are allowed (drafting the same card twice yields two copies).
+  Train is hidden on **Floor 14** (heal only).
+* Card **upgrade** at Rest Sites — _(planned)_.
 
-## 10. The Ascension System (Difficulty Ladder)
-Unlocked sequentially after beating the game. Modifiers stack.
-* **Level 1:** Rest Sites heal for 15% instead of 30%.
-* **Level 2:** Normal enemies deal 15% more damage.
-* **Level 3:** Elite enemies gain 20% more HP and Damage.
-* **Level 4:** Player Max HP starts at 68 instead of 80.
-* **Level 5:** Bosses gain an extra mechanic (e.g., Slime King clears debuffs every 2 turns instead of 3).
+## 8. Cards
+**Starter Deck (10 cards):**
+* 5× **Strike** — 1 energy, 6 damage
+* 4× **Defend** — 1 energy, 5 block
+* 1× **Bash** — 2 energy, 8 damage + apply **1 Vulnerable**
 
-## 11. Global Leaderboard
-* **Metric:** Total Turns Taken to complete the run (lowest score wins).
-* **Tech Stack:** Use a free BaaS (like Supabase). The AI will write a JavaScript `fetch()` request when the Act 3 Boss dies to send: `{ playerName: String, difficultyLevel: Int, totalTurns: Int }`.
-* **UI:** A "Global Rankings" HTML table on the main menu fetching the top 10 lowest turn counts per difficulty.
+**Draftable Cards (Rest Site → Train):**
+* **Cleave** — 2 energy, 8 damage to **all** enemies (AOE)
+* **Thunder** — 2 energy, 15 damage, +1 energy next turn
+* **Barricade** — 1 energy, 8 block; **your block no longer resets at the start of your turn**
+  (rest of combat). The Juggernaut enabler.
+
+**Status Card:**
+* **Slime** — unplayable; costs 1 energy to remove from hand, then exhausts. Injected into the
+  discard pile by the boss's Goo Spit.
+
+_Poison / Venom archetype — (planned)._
+
+## 9. Enemies (Act 1 — Slime Biome)
+Intents are telegraphed; each enemy walks a repeating **rotation** by turn number.
+
+| Enemy | Role | HP | Gold | Rotation |
+|-------|------|----|-----:|----------|
+| **Slime** | Normal | 40 | 15 | Tackle 6 |
+| **Red Slime** | Normal | 20 | 15 | Tackle 10 → Defend 3 |
+| **Acid Slime** | Elite (F5) | 60 | 30 | Tackle 10 → Defend 15 · drops Vampire Tooth |
+| **Spiked Slime** | Elite (F11) | 80 | 30 | Tackle 8 → Spike (5 dmg + 10 block) · drops Mysterious Amber |
+| **Slime King** | Boss (F15) | 160 | 100 | Tackle 12 → Goo Spit ×2 → Harden (15 block + 2 Strength, clears debuffs) |
+
+**Intent types:** Tackle (damage), Defend (block), Spike (damage + block), Goo Spit (inject
+Slime status cards + drain energy), Harden (block + Strength + cleanse own debuffs).
+
+## 10. Relics
+Passive modifiers. **Every relic the player owns is active** — there is no equip/unequip.
+The relic bar (bottom-right) shows all owned relic icons; tapping opens the inventory and
+holding an icon shows its description. Effects apply the moment a relic is obtained.
+
+* **Vampire Tooth** (Acid Slime, F5) — 50% chance to heal 2 HP when you play an Attack card.
+* **Mysterious Amber** (Spiked Slime, F11) — Gain **6 Block at the start of combat**, and
+  **5 Block at the start of every 3rd turn**. Anti-abuse: the start-of-combat block only
+  applies if you already *owned* Amber when the fight began; earning it **mid-combat** instead
+  starts a **3-turn countdown** before the +6 lands.
+
+**Drop rules:** each relic only drops from its specific elite, and currently drops at **100%**.
+Newly earned relics are immediately active; duplicates are kept in the inventory (dedicated
+upgrade behavior is _planned_).
+
+## 11. Presentation / Animations
+* **Turn banners** — "Player Turn" / "Enemy Turn" between phases.
+* **Combat VFX** — frame-by-frame sprite animations: `basic_attack_animation` (hits),
+  `heal_debuff_animation2` (heal/debuff), and a `goo_spit_animation` projectile that flies
+  from the boss to the player on Goo Spit.
+* **Card animations** — deal-in, flip, and play-out; relic reveal banner.
+
+## 12. Not Yet Implemented (Roadmap)
+* Branching **Map** screen; **Shop** wares/economy (the shop screen exists as a placeholder).
+* **Acts 2 & 3** and their bosses.
+* **Card upgrades** at Rest Sites; **relic duplicate** upgrades.
+* **Poison** archetype and synergy relics.
+* **Ascension** difficulty ladder and the **global leaderboard**.

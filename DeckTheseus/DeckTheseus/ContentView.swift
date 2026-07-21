@@ -311,17 +311,19 @@ struct ContentView: View {
                     .frame(width: geo.size.width, height: geo.size.height)
                     .clipped()
 
-                // Top bar: Floor-Act + Turn (left), dev SKIP (right)
-                HStack(spacing: 12) {
-                    Text("\(engine.currentAct)-\(engine.currentFloor)")
-                        .font(.pixel(titleFont * 1.2))
-                        .foregroundColor(.textParchment)
+                // Top bar: Floor-Act + Turn + Gold (left), dev SKIP (right)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 12) {
+                        Text("\(engine.currentAct)-\(engine.currentFloor)")
+                            .font(.pixel(titleFont * 1.2))
+                            .foregroundColor(.textParchment)
 
-                    Text("Turn \(engine.currentTurn)")
-                        .font(.pixel(titleFont))
-                        .foregroundColor(.textMuted)
+                        Text("Turn \(engine.currentTurn)")
+                            .font(.pixel(titleFont))
+                            .foregroundColor(.textMuted)
+                    }
 
-                    Spacer()
+                    goldDisplay(size: titleFont * 1.1)
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 12)
@@ -393,8 +395,9 @@ struct ContentView: View {
 
                 // Enemies (RIGHT) — one or more; tap a sprite to target it.
                 // Each enemy's display size comes from its own spriteScale so it's
-                // consistent across every floor it appears on.
-                HStack(alignment: .top, spacing: sideMargin * 0.5) {
+                // consistent across every floor it appears on. Tight spacing keeps the
+                // group clustered on the right, out of the player's side of the arena.
+                HStack(alignment: .top, spacing: heartSize * 0.1) {
                     ForEach(Array(engine.enemies.enumerated()), id: \.element.id) { index, enemy in
                         EnemyView(
                             enemy: enemy,
@@ -645,37 +648,24 @@ struct ContentView: View {
                     if engine.gameState == .drafting {
                         draftOverlay(unit: unit, btnFontSize: btnFontSize)
                             .zIndex(999)
+                    } else if engine.gameState == .victory {
+                        victoryOverlay(unit: unit, btnFontSize: btnFontSize)
+                            .zIndex(999)
+                    } else if engine.gameState == .defeat {
+                        defeatOverlay(unit: unit, btnFontSize: btnFontSize)
+                            .zIndex(999)
                     } else {
                         VStack(spacing: 20) {
                             switch engine.gameState {
-                            case .victory:
-                                overlayTitle("VICTORY", size: titleFontSize, color: .goldBright)
-                                Text("Act \(engine.currentAct) - Floor \(engine.currentFloor) cleared!")
+                            case .shop:
+                                overlayTitle("SHOP", size: titleFontSize * 0.75, color: .goldBright)
+                                Text("The merchant is still setting up shop...")
                                     .font(.pixel(btnFontSize))
                                     .foregroundColor(.textParchment)
-                                HStack(spacing: unit * 0.05) {
-                                    overlayButton("NEXT STAGE", fontSize: btnFontSize) {
-                                        isEnemyTurn = false
-                                        if engine.isBossFloor {
-                                            engine.advanceToNextAct()
-                                        } else {
-                                            engine.advanceToNextFloor()
-                                        }
-                                        if engine.gameState == .playing { dealNewHand() }
-                                    }
-                                    overlayButton("RESTART", fontSize: btnFontSize) {
-                                        isEnemyTurn = false
-                                        engine.restartCombat()
-                                        dealNewHand()
-                                    }
-                                }
-
-                            case .defeat:
-                                overlayTitle("DEFEAT", size: titleFontSize, color: Color(hex: 0xCC2244))
-                                overlayButton("RETRY FIGHT (DEV MODE)", fontSize: btnFontSize) {
+                                overlayButton("LEAVE SHOP", fontSize: btnFontSize) {
                                     isEnemyTurn = false
-                                    engine.restartCombat()
-                                    dealNewHand()
+                                    engine.leaveShop()
+                                    if engine.gameState == .playing { dealNewHand() }
                                 }
 
                             case .restSite:
@@ -689,18 +679,20 @@ struct ContentView: View {
                                         engine.restHealAndAdvance()
                                         if engine.gameState == .playing { dealNewHand() }
                                     }
-                                    overlayButton("Train\n(Draft a Card)", fontSize: btnFontSize) {
-                                        engine.chooseTrainDraft()
+                                    if engine.restDraftAllowed {
+                                        overlayButton("Train\n(Draft a Card)", fontSize: btnFontSize) {
+                                            engine.chooseTrainDraft()
+                                        }
                                     }
                                 }
 
                             case .actComplete:
-                                overlayTitle("ACT \(engine.currentAct)", size: titleFontSize * 0.8, color: .goldBright)
-                                Text("TO BE CONTINUED")
+                                overlayTitle("ACT \(engine.currentAct) COMPLETE", size: titleFontSize * 0.6, color: .goldBright)
+                                Text("You conquered the Slime Biome!")
                                     .font(.pixel(btnFontSize * 1.2))
                                     .foregroundColor(.textParchment)
 
-                            case .drafting, .playing:
+                            case .victory, .defeat, .drafting, .playing:
                                 EmptyView()
                             }
                         }
@@ -752,6 +744,185 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
+    // MARK: - Gold
+
+    /// Placeholder gold-coin icon (swap for real art later).
+    private func goldCoin(size: CGFloat) -> some View {
+        ZStack {
+            Circle().fill(
+                LinearGradient(colors: [Color(hex: 0xFFD966), Color(hex: 0xE0A828)],
+                               startPoint: .top, endPoint: .bottom))
+            Circle().stroke(Color(hex: 0x9C6D12), lineWidth: max(1, size * 0.08))
+            Text("G")
+                .font(.pixel(size * 0.62))
+                .foregroundColor(Color(hex: 0x7A5410))
+        }
+        .frame(width: size, height: size)
+    }
+
+    /// Top-left "gold owned" indicator: coin icon + amount.
+    private func goldDisplay(size: CGFloat) -> some View {
+        HStack(spacing: 6) {
+            goldCoin(size: size)
+            Text("\(engine.player.gold)")
+                .font(.pixel(size))
+                .foregroundColor(.goldBright)
+        }
+    }
+
+    // MARK: - Result Screens (Victory / Defeat)
+
+    /// Shared end-of-combat scaffold: Act-Floor header + title banner, the hero in the
+    /// center, a rewards bar, and a right-aligned row of buttons. Victory and Defeat use
+    /// the same layout — only the title, its color, the rewards, and the buttons differ.
+    @ViewBuilder
+    private func resultOverlay<Buttons: View>(
+        unit: CGFloat,
+        title: String,
+        titleColor: Color,
+        showRewards: Bool,
+        @ViewBuilder buttons: () -> Buttons
+    ) -> some View {
+        let titleSize = min(unit * 0.10, 64)
+        let heroSpriteH = min(unit * 0.15, 108)   // small so the title + rewards stay the focus
+
+        VStack(spacing: 0) {
+            // Header — Act-Floor number above the title banner (kept clear of the top edge).
+            VStack(spacing: 2) {
+                Text("\(engine.currentAct)-\(engine.currentFloor)")
+                    .font(.pixel(titleSize * 0.5))
+                    .foregroundColor(titleColor)
+                overlayTitle(title, size: titleSize, color: titleColor)
+            }
+            .padding(.top, unit * 0.11)
+
+            Spacer()
+
+            // Center — the hero.
+            CroppedSprite(name: "player_sprite", contentW: 0.33, contentH: 0.4375, targetH: heroSpriteH)
+                .shadow(color: Color(hex: 0xA07830).opacity(0.4), radius: 14)
+
+            Spacer()
+
+            // Rewards bar (empty on defeat).
+            rewardsBar(unit: unit, showRewards: showRewards)
+
+            // Buttons — right-aligned below the bar.
+            HStack(spacing: unit * 0.025) {
+                Spacer()
+                buttons()
+            }
+            .padding(.horizontal, unit * 0.06)
+            .padding(.top, unit * 0.03)
+            .padding(.bottom, unit * 0.05)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private func victoryOverlay(unit: CGFloat, btnFontSize: CGFloat) -> some View {
+        resultOverlay(unit: unit, title: "VICTORY", titleColor: .goldBright, showRewards: true) {
+            victoryButton("Exit", fontSize: btnFontSize, tint: Color(hex: 0x4A90C2)) {
+                // No-op for now — returns to the Map once the mapping system exists.
+            }
+            victoryButton("Next Stage", fontSize: btnFontSize, tint: Color(hex: 0x5BA84F)) {
+                isEnemyTurn = false
+                engine.advanceFloor()
+                if engine.gameState == .playing { dealNewHand() }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func defeatOverlay(unit: CGFloat, btnFontSize: CGFloat) -> some View {
+        resultOverlay(unit: unit, title: "DEFEAT", titleColor: Color(hex: 0xCC2244), showRewards: false) {
+            victoryButton("Try Again", fontSize: btnFontSize, tint: Color(hex: 0xD86A8C)) {
+                isEnemyTurn = false
+                engine.startGame()      // restart the whole run from Act 1, Floor 1
+                dealNewHand()
+            }
+            victoryButton("Exit", fontSize: btnFontSize, tint: Color(hex: 0x4A90C2)) {
+                // No-op for now — returns to the Map once the mapping system exists.
+            }
+        }
+    }
+
+    /// The bar below the hero. On victory it holds the reward chips (first-win bonus in
+    /// front of the normal gold); on defeat it's an empty bar of the same size.
+    private func rewardsBar(unit: CGFloat, showRewards: Bool) -> some View {
+        let chip = min(unit * 0.10, 76)
+        return HStack(spacing: unit * 0.018) {
+            if showRewards {
+                if engine.lastFirstWinBonus > 0 {
+                    rewardChip(amount: engine.lastFirstWinBonus, size: chip, firstWin: true)
+                }
+                rewardChip(amount: engine.lastGoldEarned, size: chip, firstWin: false)
+            } else {
+                // Reserve the chip height so the empty bar matches the victory bar's size.
+                Color.clear.frame(width: 1, height: chip * 1.8)
+            }
+        }
+        .frame(maxWidth: .infinity)   // full-width bar, chip group centered
+        .padding(.horizontal, unit * 0.05)
+        .padding(.vertical, unit * 0.02)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(Color(hex: 0x1A1228).opacity(0.9))
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.goldBorder, lineWidth: 2))
+        )
+        .padding(.horizontal, unit * 0.04)
+    }
+
+    private func rewardChip(amount: Int, size: CGFloat, firstWin: Bool) -> some View {
+        VStack(spacing: 5) {
+            // "First Win" bubble — fixed-height row so chips with/without it align.
+            // (Uses an empty ZStack, not Color.clear, so it never stretches width.)
+            ZStack {
+                if firstWin {
+                    Text("First Win")
+                        .font(.pixel(size * 0.26))
+                        .foregroundColor(Color(hex: 0x3A2A10))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(Color(hex: 0xFFD966)))
+                        .fixedSize()
+                }
+            }
+            .frame(height: size * 0.36)
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(LinearGradient(colors: [Color(hex: 0x2E2340), Color(hex: 0x1A1228)],
+                                         startPoint: .top, endPoint: .bottom))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.goldBorder, lineWidth: 1.5))
+                goldCoin(size: size * 0.62)
+            }
+            .frame(width: size, height: size)
+
+            Text("+\(amount)")
+                .font(.pixel(size * 0.34))
+                .foregroundColor(.goldBright)
+        }
+        .fixedSize()   // hug content width — prevents the chip from expanding the bar
+    }
+
+    @ViewBuilder
+    private func victoryButton(_ title: String, fontSize: CGFloat, tint: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.pixel(fontSize))
+                .foregroundColor(.white)
+                .padding(.horizontal, 22)
+                .padding(.vertical, 12)
+                .background(
+                    LinearGradient(colors: [tint, tint.opacity(0.65)], startPoint: .top, endPoint: .bottom)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.55), lineWidth: 2))
+        }
+        .buttonStyle(.plain)
+    }
+
     // MARK: - Relic Bar & Inventory
 
     /// A small description bubble matching the card tooltip look.
@@ -766,20 +937,24 @@ struct ContentView: View {
             .fixedSize()
     }
 
-    /// The always-visible relic bar — fixed size, shows the equipped relic (or a
-    /// "?" when nothing is equipped), and opens the inventory on tap.
+    /// The always-visible relic bar — shows every owned relic (all are active). Tapping
+    /// opens the inventory; holding an icon shows its description. Empty = a blank bar.
     private func relicBar(size: CGFloat) -> some View {
-        let barW = size * 2.2   // width of the (wide) relic icon at this height
+        let iconW = size * 2.2   // relic art is wide (~2.2:1)
         return Group {
-            if let relic = engine.equippedRelic {
-                CroppedSprite(name: relic.iconName, contentW: 0.578, contentH: 0.266, targetH: size)
+            if engine.playerRelics.isEmpty {
+                Color.clear
+                    .frame(width: iconW, height: size)
+                    .contentShape(Rectangle())
+                    .onTapGesture { showInventory = true }
             } else {
-                Text("?")
-                    .font(.pixel(size * 1.1))
-                    .foregroundColor(Color(hex: 0x8A7AA0))
+                HStack(spacing: 8) {
+                    ForEach(engine.playerRelics) { relic in
+                        relicBarIcon(relic, iconW: iconW, size: size)
+                    }
+                }
             }
         }
-        .frame(width: barW, height: size)   // identical size in every state
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .background(
@@ -787,38 +962,35 @@ struct ContentView: View {
                 .fill(Color.black.opacity(0.35))
                 .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.goldBorder.opacity(0.7), lineWidth: 1.5))
         )
-        .contentShape(Rectangle())          // consistent hitbox across states
-        .overlay(alignment: .topTrailing) {
-            // Only while the inventory is closed, so it doesn't double up.
-            if !showInventory, let relic = engine.equippedRelic, relicTooltipId == relic.id {
-                relicTooltipBubble(relic)
-                    .offset(y: -(size * 2.6))
-                    .zIndex(50)
-            }
-        }
-        .onTapGesture { showInventory = true }
-        .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
-            withAnimation(.easeInOut(duration: 0.2)) {
-                relicTooltipId = (pressing ? engine.equippedRelic?.id : nil)
-            }
-        }, perform: {})
     }
 
-    /// One relic slot inside the inventory grid (tap to equip/unequip, hold to read).
+    /// One relic icon in the bar — tap to open the inventory, hold to read its description.
+    private func relicBarIcon(_ relic: Relic, iconW: CGFloat, size: CGFloat) -> some View {
+        CroppedSprite(name: relic.iconName, contentW: 0.578, contentH: 0.266, targetH: size)
+            .frame(width: iconW, height: size)
+            .contentShape(Rectangle())
+            .overlay(alignment: .top) {
+                // Only while the inventory is closed, so it doesn't double up.
+                if !showInventory, relicTooltipId == relic.id {
+                    relicTooltipBubble(relic)
+                        .offset(y: -(size * 2.6))
+                        .zIndex(50)
+                }
+            }
+            .onTapGesture { showInventory = true }
+            .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
+                withAnimation(.easeInOut(duration: 0.2)) { relicTooltipId = pressing ? relic.id : nil }
+            }, perform: {})
+    }
+
+    /// One relic slot inside the inventory grid. Every owned relic is active — there is
+    /// no equip toggle; hold a slot to read its description.
     private func inventoryRelicSlot(_ relic: Relic, size: CGFloat) -> some View {
-        let equipped = engine.equippedRelicId == relic.id
         // Icon fits inside the square with padding (wide art → scale by width).
-        return CroppedSprite(name: relic.iconName, contentW: 0.578, contentH: 0.266, targetH: size * 0.34)
+        CroppedSprite(name: relic.iconName, contentW: 0.578, contentH: 0.266, targetH: size * 0.34)
             .frame(width: size, height: size)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(equipped ? Color.goldAccent.opacity(0.30) : Color.black.opacity(0.30))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(equipped ? Color.goldBright : Color.goldBorder.opacity(0.6),
-                            lineWidth: equipped ? 3 : 1.5)
-            )
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.30)))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.goldBorder.opacity(0.6), lineWidth: 1.5))
             .overlay(alignment: .bottom) {
                 // Below the slot so it isn't hidden behind the "RELICS" header.
                 if relicTooltipId == relic.id {
@@ -828,9 +1000,6 @@ struct ContentView: View {
                 }
             }
             .contentShape(Rectangle())
-            .onTapGesture {
-                withAnimation(.easeOut(duration: 0.15)) { engine.toggleEquip(relic.id) }
-            }
             .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
                 withAnimation(.easeInOut(duration: 0.2)) { relicTooltipId = pressing ? relic.id : nil }
             }, perform: {})
@@ -1025,15 +1194,22 @@ struct ContentView: View {
         // Snapshot what the player's selection will do before it's consumed.
         let playerWillAttack = engine.selectedDealsDamage
         let playerWillShield = engine.selectedGivesBlock
+        let playerAttackHitsAll = engine.selectedAttackHitsAll
 
         Task { @MainActor in
             // 1. Short beat after pressing End Turn — the player's hand stays on screen.
             try? await Task.sleep(for: .seconds(0.35))
 
             // 2. Resolve the player's cards, then play their animation.
-            let attackTargetIndex = engine.targetIndex   // enemy that gets hit
+            // Cleave hits every enemy, so the hit VFX plays on all living enemies
+            // (captured before they resolve); a normal attack plays on the target only.
+            let attackedIndices: [Int] = playerAttackHitsAll
+                ? engine.enemies.indices.filter { engine.enemies[$0].isAlive }
+                : [engine.targetIndex]
             engine.playSelectedCards()
-            if playerWillAttack { setEnemyVFX(.attack, at: attackTargetIndex) }
+            if playerWillAttack {
+                for idx in attackedIndices { setEnemyVFX(.attack, at: idx) }
+            }
             if playerWillShield { setPlayerVFX(.healDebuff) }
             let playerAnim = max(playerWillAttack ? attackAnimDuration : 0,
                                  playerWillShield ? healAnimDuration : 0)
