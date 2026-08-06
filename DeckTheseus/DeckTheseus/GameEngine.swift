@@ -129,7 +129,7 @@ struct Card: Identifiable {
                  imageName: "card_cleave_attack", hitsAllEnemies: true),
             Card(name: "Thunder", type: .attack, energyCost: 2, damage: 15, block: 0,
                  imageName: "card_thunder_attack", energyNextTurn: 1),
-            Card(name: "Barricade", type: .skill, energyCost: 1, damage: 0, block: 8,
+            Card(name: "Barricade", type: .skill, energyCost: 3, damage: 0, block: 8,
                  imageName: "card_barricade_skill", permanentBlock: true),
         ]
     }
@@ -403,44 +403,50 @@ class GameEngine {
         }
     }
 
+    // Selected (highlighted, not-yet-played) cards "reserve" their energy so the HUD
+    // previews the cost — the counter drops the moment you select a card, before it's
+    // played. Playing a card spends real energy but also drops it from the selection,
+    // so the displayed remainder stays consistent.
     var usedEnergy: Int {
         deck.hand
             .filter { selectedCardIds.contains($0.id) }
             .reduce(0) { $0 + $1.energyCost }
     }
 
-    var remainingEnergy: Int {
-        player.currentEnergy - usedEnergy
-    }
-
-    var pendingPlayerBlock: Int {
-        deck.hand
-            .filter { selectedCardIds.contains($0.id) }
-            .reduce(0) { $0 + $1.block }
-    }
-
-    var displayPlayerBlock: Int {
-        player.currentBlock + pendingPlayerBlock
-    }
+    var remainingEnergy: Int { player.currentEnergy - usedEnergy }
+    var displayPlayerBlock: Int { player.currentBlock }
 
     init() {
         startGame()
     }
 
     func canAfford(_ card: Card) -> Bool {
-        if selectedCardIds.contains(card.id) { return true }
+        if selectedCardIds.contains(card.id) { return true }   // already reserved
         return remainingEnergy >= card.energyCost
     }
 
-    func toggleSelection(_ cardId: UUID) {
+    /// Tap a card to toggle its selection. Multiple cards can be selected at once —
+    /// selection is only a visual highlight (energy is spent when a card is played,
+    /// one at a time, by dragging it).
+    func toggleSelect(_ cardId: UUID) {
         guard gameState == .playing else { return }
         if selectedCardIds.contains(cardId) {
             selectedCardIds.remove(cardId)
         } else {
-            guard let card = deck.hand.first(where: { $0.id == cardId }) else { return }
-            guard remainingEnergy >= card.energyCost else { return }
+            guard let card = deck.hand.first(where: { $0.id == cardId }), canAfford(card) else { return }
             selectedCardIds.insert(cardId)
         }
+    }
+
+    /// Ensure a card is highlighted (used when a drag begins on it).
+    func selectCard(_ cardId: UUID) {
+        guard gameState == .playing else { return }
+        selectedCardIds.insert(cardId)
+    }
+
+    /// Clear every selected card.
+    func clearSelection() {
+        selectedCardIds.removeAll()
     }
 
     // MARK: - Combat Resolution
@@ -487,61 +493,63 @@ class GameEngine {
     }
 
     // MARK: - Play Cards
+    //
+    // Playing is two-phase so plays can be queued: COMMIT happens the instant a card is
+    // dragged out (it leaves the hand and its energy is spent), while its EFFECT resolves
+    // later (in order), letting the player fire off several cards without waiting.
 
-    func playSelectedCards() {
+    /// Commit a played card: spend its energy and move it out of the hand immediately.
+    /// The effect is applied later by `resolveCardEffect`.
+    func commitCardPlay(_ card: Card) {
+        guard gameState == .playing, canAfford(card) else { return }
+        player.currentEnergy -= card.energyCost
+        selectedCardIds.remove(card.id)
+        deck.hand.removeAll { $0.id == card.id }
+        if card.isExhaustible {
+            deck.exhaustPile.append(card)
+        } else {
+            deck.discardPile.append(card)
+        }
+    }
+
+    /// Apply a committed card's effect to `targetIndex` (captured when it was played, so a
+    /// queued card still hits the enemy the player aimed at), or to all enemies for AOE.
+    func resolveCardEffect(_ card: Card, targetIndex: Int) {
         guard gameState == .playing else { return }
-        let selected = deck.hand.filter { selectedCardIds.contains($0.id) }
-        for card in selected {
-            if card.damage > 0 {
-                if card.hitsAllEnemies {
-                    // AOE — ignore targetIndex, hit every living enemy.
-                    for enemy in enemies where enemy.isAlive {
-                        dealDamage(card.damage, to: enemy)
-                    }
-                } else if let target = currentTarget, target.isAlive {
-                    dealDamage(card.damage, to: target)
+        let target: Enemy? = enemies.indices.contains(targetIndex) ? enemies[targetIndex] : nil
+
+        if card.damage > 0 {
+            if card.hitsAllEnemies {
+                for enemy in enemies where enemy.isAlive {
+                    dealDamage(card.damage, to: enemy)
                 }
-            }
-            if let target = currentTarget, target.isAlive, card.vulnerableApply > 0 {
-                target.vulnerableTurns += card.vulnerableApply
-            }
-            if card.block > 0 {
-                player.currentBlock += card.block
-            }
-            if card.energyNextTurn > 0 {
-                extraEnergyNextTurn += card.energyNextTurn
-            }
-            if card.blockNextTurn > 0 {
-                extraBlockNextTurn += card.blockNextTurn
-            }
-            if card.permanentBlock {
-                blockPersists = true   // Barricade — block stops resetting for the rest of combat
-            }
-
-            // Relic: Vampire Tooth (when owned) — 50% chance to heal 2 HP
-            // whenever an Attack card is played.
-            if card.type == .attack, hasRelic(named: "Vampire Tooth"), Bool.random() {
-                player.currentHp = min(player.maxHp, player.currentHp + 2)
-            }
-
-            checkCombatResolution()   // grants relics once the whole floor is cleared
-            if gameState != .playing { break }
-        }
-        // Retarget only AFTER the whole selection resolves, so overkill on a single
-        // target is wasted (not redirected to another enemy mid-cast). This just keeps
-        // the reticle on a living enemy for next turn.
-        retargetIfNeeded()
-        player.currentEnergy -= usedEnergy
-        deck.hand.removeAll { selectedCardIds.contains($0.id) }
-
-        for card in selected {
-            if card.isExhaustible {
-                deck.exhaustPile.append(card)
-            } else {
-                deck.discardPile.append(card)
+            } else if let target, target.isAlive {
+                dealDamage(card.damage, to: target)
             }
         }
-        selectedCardIds.removeAll()
+        if let target, target.isAlive, card.vulnerableApply > 0 {
+            target.vulnerableTurns += card.vulnerableApply
+        }
+        if card.block > 0 {
+            player.currentBlock += card.block
+        }
+        if card.energyNextTurn > 0 {
+            extraEnergyNextTurn += card.energyNextTurn
+        }
+        if card.blockNextTurn > 0 {
+            extraBlockNextTurn += card.blockNextTurn
+        }
+        if card.permanentBlock {
+            blockPersists = true   // Barricade — block stops resetting for the rest of combat
+        }
+
+        // Relic: Vampire Tooth (when owned) — 50% chance to heal 2 HP on an Attack card.
+        if card.type == .attack, hasRelic(named: "Vampire Tooth"), Bool.random() {
+            player.currentHp = min(player.maxHp, player.currentHp + 2)
+        }
+
+        retargetIfNeeded()          // keep the reticle on a living enemy if the target died
+        checkCombatResolution()     // grants relics once the whole floor is cleared
     }
 
     // MARK: - Enemy Turn
@@ -593,24 +601,7 @@ class GameEngine {
         }
     }
 
-    // MARK: - End Turn
-
-    /// Synchronous end-of-turn (no animation). Delegates to the same granular steps
-    /// the view's orchestrator uses, so block reset, relics, and buffs stay in one place.
-    func endTurn() {
-        guard gameState == .playing else { return }
-
-        playSelectedCards()
-        if gameState != .playing { return }
-
-        discardHand()
-        runEnemyTurn()
-        if gameState != .playing { return }
-
-        beginNextTurn()
-    }
-
-    // MARK: - Granular Turn Steps (for animated orchestration)
+    // MARK: - Turn Steps (driven by the view's animated orchestration)
 
     /// Move any remaining cards in hand to the discard pile.
     func discardHand() {
@@ -648,20 +639,6 @@ class GameEngine {
         }
 
         deck.drawCards(5)
-    }
-
-    // Detection helpers for choosing which VFX to play.
-    var selectedDealsDamage: Bool {
-        deck.hand.contains { selectedCardIds.contains($0.id) && $0.damage > 0 }
-    }
-
-    /// A selected damage card hits every enemy (Cleave) — so the hit VFX plays on all of them.
-    var selectedAttackHitsAll: Bool {
-        deck.hand.contains { selectedCardIds.contains($0.id) && $0.damage > 0 && $0.hitsAllEnemies }
-    }
-
-    var selectedGivesBlock: Bool {
-        deck.hand.contains { selectedCardIds.contains($0.id) && $0.block > 0 }
     }
 
     /// Any living enemy is about to attack the player this turn.

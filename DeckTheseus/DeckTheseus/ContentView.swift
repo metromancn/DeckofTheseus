@@ -265,6 +265,22 @@ struct ContentView: View {
     @State private var revealedCardIds: Set<UUID> = []
     @State private var isEnemyTurn = false
 
+    // Drag-to-play: which hand card is being dragged, and its live drag offset.
+    @State private var draggingCardId: UUID? = nil
+    @State private var cardDragOffset: CGSize = .zero
+    // Queued plays: a played card leaves the hand instantly and its effect resolves later
+    // (in order, each with its center-hold), so the player can fire off cards without waiting.
+    @State private var pendingPlays: [QueuedPlay] = []
+    @State private var isProcessingPlays = false
+    // The card currently parked in the center (held, then faded) before its effect fires.
+    @State private var resolvingCard: Card? = nil
+    @State private var resolvingCardOpacity: Double = 1.0
+
+    struct QueuedPlay {
+        let card: Card
+        let targetIndex: Int
+    }
+
     // Goo-spit projectile (boss → player)
     @State private var gooSpitActive = false
     @State private var gooSpitFrame = 0
@@ -280,7 +296,6 @@ struct ContentView: View {
     @State private var relicTooltipId: UUID? = nil
     @State private var earnedRelicBanner: Relic? = nil
     @State private var relicBannerContinuation: CheckedContinuation<Void, Never>? = nil
-    @State private var showInventory = false
 
     var body: some View {
         GeometryReader { geo in
@@ -328,11 +343,12 @@ struct ContentView: View {
                 .padding(.horizontal, 20)
                 .padding(.top, 12)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .zIndex(700)   // keep the HUD (and relic tooltips) above the arena
 
                 // DEV ONLY — instant-win the fight to speed up testing.
                 if engine.gameState == .playing {
                     Button {
-                        guard engine.gameState == .playing, !engine.isResolvingTurn else { return }
+                        guard engine.gameState == .playing, !engine.isResolvingTurn, !isProcessingPlays else { return }
                         isEnemyTurn = false
                         engine.devWinCombat()          // kills all enemies, awards relic, marks .victory
                         Task { @MainActor in
@@ -397,11 +413,19 @@ struct ContentView: View {
                 // Each enemy's display size comes from its own spriteScale so it's
                 // consistent across every floor it appears on. Tight spacing keeps the
                 // group clustered on the right, out of the player's side of the arena.
+                // Dragging or resolving an AOE card (Cleave) marks every living enemy;
+                // otherwise only the single current target is reticled.
+                let draggedCardIsAOE: Bool = {
+                    if let rc = resolvingCard, rc.hitsAllEnemies, rc.damage > 0 { return true }
+                    guard let id = draggingCardId,
+                          let c = engine.deck.hand.first(where: { $0.id == id }) else { return false }
+                    return c.hitsAllEnemies && c.damage > 0
+                }()
                 HStack(alignment: .top, spacing: heartSize * 0.1) {
                     ForEach(Array(engine.enemies.enumerated()), id: \.element.id) { index, enemy in
                         EnemyView(
                             enemy: enemy,
-                            isTarget: index == engine.targetIndex,
+                            isTarget: draggedCardIsAOE ? enemy.isAlive : index == engine.targetIndex,
                             spriteH: bossSpriteH * enemy.spriteScale,
                             groundH: bossSpriteH,
                             heartSize: heartSize,
@@ -448,11 +472,8 @@ struct ContentView: View {
                 .padding(.leading, 16)
                 .padding(.bottom, 8)
 
-                // Bottom-RIGHT: Relic bar, then Energy, then End Turn (compact)
+                // Bottom-RIGHT: Energy, then End Turn (compact)
                 VStack(alignment: .trailing, spacing: 6) {
-                    // Relic bar — always shown; tap to open the inventory.
-                    relicBar(size: orbSize * 0.5)
-
                     HStack(spacing: 6) {
                         PixelImage(name: "hud_energy_orb", width: orbSize * 0.7, height: orbSize * 0.7)
                             .shadow(color: Color(hex: 0xA040D0).opacity(0.6), radius: 10)
@@ -463,12 +484,12 @@ struct ContentView: View {
                     }
 
                     Button {
-                        resolveTurn(size: geo.size)
+                        endPlayerTurn(size: geo.size)
                     } label: {
                         CroppedSprite(name: "end_turn", contentW: 0.67, contentH: 0.1875, targetH: orbSize * 0.55)
                     }
                     .buttonStyle(.plain)
-                    .disabled(engine.isResolvingTurn)
+                    .disabled(engine.isResolvingTurn || isProcessingPlays)   // wait for queued plays
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 .padding(.trailing, 16)
@@ -480,6 +501,8 @@ struct ContentView: View {
                     let mid = count > 1 ? Double(count - 1) / 2.0 : 0
                     // Fewer cards → tighter, smaller semi-circle.
                     let spreadScale = min(1.0, Double(count) / 5.0)
+                    // Drag a card up past this much to release it into the "play zone".
+                    let playThreshold = geo.size.height * 0.16
 
                     ForEach(Array(engine.deck.hand.enumerated()), id: \.element.id) { index, card in
                         let t = count > 1 ? (Double(index) - mid) / mid : 0
@@ -490,11 +513,17 @@ struct ContentView: View {
                         let isDealt = dealtCardIds.contains(card.id)
                         let isRevealed = revealedCardIds.contains(card.id)
                         let isSelected = engine.selectedCardIds.contains(card.id)
+                        let isDragging = draggingCardId == card.id
+                        // Card is lifted high enough that releasing will play it.
+                        let inPlayZone = isDragging && cardDragOffset.height < -playThreshold
 
                         let startX = Double(-handWidth) * 0.55
-                        let currentX = isDealt ? fanX : startX
-                        let currentY = (isDealt ? fanY : 0) + (isSelected ? -cardH * 0.15 : 0)
-                        let currentAngle = isDealt ? fanAngle : 0
+                        let dragX = isDragging ? Double(cardDragOffset.width) : 0
+                        let dragY = isDragging ? Double(cardDragOffset.height) : 0
+                        let currentX = (isDealt ? fanX : startX) + dragX
+                        let currentY = (isDealt ? fanY : 0) + (isSelected ? -cardH * 0.15 : 0) + dragY
+                        // Straighten the card while it's being dragged.
+                        let currentAngle = isDragging ? 0 : (isDealt ? fanAngle : 0)
 
                         Group {
                             if isRevealed {
@@ -513,19 +542,48 @@ struct ContentView: View {
                             }
                         }
                         .contentShape(Rectangle())
+                        .scaleEffect(inPlayZone ? 1.06 : 1.0)   // "ready to play" cue
                         .offset(x: currentX, y: currentY)
                         .rotationEffect(.degrees(currentAngle), anchor: .bottom)
                         .zIndex(
+                            isDragging ? 500 :
                             tooltipCardId == card.id ? 200 :
                             isSelected ? 100 + Double(index) :
                             Double(index)
                         )
-                        .allowsHitTesting(isRevealed && !engine.isResolvingTurn)
+                        .allowsHitTesting(isRevealed && !engine.isResolvingTurn && !isEnemyTurn)
+                        // Tap toggles selection (multi-select — floats the card up).
                         .onTapGesture {
-                            withAnimation(.easeOut(duration: 0.15)) {
-                                engine.toggleSelection(card.id)
-                            }
+                            withAnimation(.easeOut(duration: 0.15)) { engine.toggleSelect(card.id) }
                         }
+                        // Drag it up into the middle and release to play it (one at a time).
+                        .gesture(
+                            DragGesture(minimumDistance: 6)
+                                .onChanged { value in
+                                    guard !engine.isResolvingTurn, !isEnemyTurn,
+                                          engine.gameState == .playing, engine.canAfford(card) else { return }
+                                    if draggingCardId != card.id {
+                                        draggingCardId = card.id
+                                        engine.selectCard(card.id)   // highlight while dragging
+                                        tooltipCardId = nil
+                                    }
+                                    cardDragOffset = value.translation
+                                }
+                                .onEnded { value in
+                                    guard draggingCardId == card.id else { return }
+                                    let releasedInPlayZone = value.translation.height < -playThreshold
+                                    draggingCardId = nil
+                                    cardDragOffset = .zero
+                                    if releasedInPlayZone && engine.canAfford(card) {
+                                        // Commit + queue instantly — the card leaves the hand
+                                        // now; its effect resolves in the play queue.
+                                        playCardNow(card)
+                                    } else {
+                                        // Not far enough — snap back to the hand.
+                                        withAnimation(.easeOut(duration: 0.2)) { cardDragOffset = .zero }
+                                    }
+                                }
+                        )
                         .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
                             withAnimation(.easeInOut(duration: 0.2)) {
                                 tooltipCardId = pressing ? card.id : nil
@@ -537,6 +595,18 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 .offset(y: cardH * 0.12)
+
+                // The card currently resolving from the play queue — parked in the center,
+                // held so the player can read it, then faded before its effect fires.
+                if let rc = resolvingCard {
+                    CardView(card: rc, isSelected: true, isAffordable: true,
+                             showTooltip: false, cardWidth: cardW, cardHeight: cardH)
+                        .scaleEffect(1.15)
+                        .opacity(resolvingCardOpacity)
+                        .position(x: geo.size.width / 2, y: geo.size.height * 0.42)
+                        .allowsHitTesting(false)
+                        .zIndex(600)
+                }
 
                 // Goo-spit projectile flying in a straight, level line boss → player
                 if gooSpitActive {
@@ -554,12 +624,6 @@ struct ContentView: View {
                         .position(pos)
                         .allowsHitTesting(false)
                         .zIndex(750)
-                }
-
-                // Relic inventory (centered modal, opened from the relic bar).
-                if showInventory {
-                    inventoryOverlay(unit: unit)
-                        .zIndex(970)
                 }
 
                 // New-relic reveal — a prominent centered modal.
@@ -760,14 +824,39 @@ struct ContentView: View {
         .frame(width: size, height: size)
     }
 
-    /// Top-left "gold owned" indicator: coin icon + amount.
+    /// Top-left HUD row: gold (coin + amount), then every owned relic's icon growing
+    /// rightward. Relics are all active; hover/hold an icon to read its name + description.
     private func goldDisplay(size: CGFloat) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             goldCoin(size: size)
             Text("\(engine.player.gold)")
                 .font(.pixel(size))
                 .foregroundColor(.goldBright)
+
+            ForEach(engine.playerRelics) { relic in
+                relicHudIcon(relic, size: size)
+            }
         }
+    }
+
+    /// A relic icon in the top HUD (same height as the gold coin). Hover or hold to
+    /// reveal its name + description just below the icon.
+    private func relicHudIcon(_ relic: Relic, size: CGFloat) -> some View {
+        CroppedSprite(name: relic.iconName, contentW: 0.578, contentH: 0.266, targetH: size)
+            .contentShape(Rectangle())
+            .overlay(alignment: .topLeading) {
+                if relicTooltipId == relic.id {
+                    relicTooltipBubble(relic)
+                        .offset(y: size + 8)      // drop the bubble below the icon
+                        .zIndex(100)
+                }
+            }
+            .onHover { hovering in
+                relicTooltipId = hovering ? relic.id : (relicTooltipId == relic.id ? nil : relicTooltipId)
+            }
+            .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
+                relicTooltipId = pressing ? relic.id : nil
+            }, perform: {})
     }
 
     // MARK: - Result Screens (Victory / Defeat)
@@ -923,150 +1012,26 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - Relic Bar & Inventory
+    // MARK: - Relic Tooltip
 
-    /// A small description bubble matching the card tooltip look.
+    /// The hover/hold bubble for a HUD relic icon: its name (gold) over its description.
+    /// Fixed width, but height grows to fit — the full description always wraps into view.
     private func relicTooltipBubble(_ relic: Relic) -> some View {
-        Text(relic.description)
-            .font(.pixel(15))
-            .foregroundColor(.textParchment)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(RoundedRectangle(cornerRadius: 4).fill(Color(hex: 0x1A1428).opacity(0.97)))
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.goldBorder, lineWidth: 1))
-            .fixedSize()
-    }
-
-    /// The always-visible relic bar — shows every owned relic (all are active). Tapping
-    /// opens the inventory; holding an icon shows its description. Empty = a blank bar.
-    private func relicBar(size: CGFloat) -> some View {
-        let iconW = size * 2.2   // relic art is wide (~2.2:1)
-        return Group {
-            if engine.playerRelics.isEmpty {
-                Color.clear
-                    .frame(width: iconW, height: size)
-                    .contentShape(Rectangle())
-                    .onTapGesture { showInventory = true }
-            } else {
-                HStack(spacing: 8) {
-                    ForEach(engine.playerRelics) { relic in
-                        relicBarIcon(relic, iconW: iconW, size: size)
-                    }
-                }
-            }
+        VStack(alignment: .leading, spacing: 3) {
+            Text(relic.name)
+                .font(.pixel(16))
+                .foregroundColor(.goldBright)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(relic.description)
+                .font(.pixel(14))
+                .foregroundColor(.textParchment)
+                .fixedSize(horizontal: false, vertical: true)   // wrap fully, never truncate
         }
-        .padding(.horizontal, 8)
+        .frame(width: 220, alignment: .leading)
+        .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 5)
-                .fill(Color.black.opacity(0.35))
-                .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.goldBorder.opacity(0.7), lineWidth: 1.5))
-        )
-    }
-
-    /// One relic icon in the bar — tap to open the inventory, hold to read its description.
-    private func relicBarIcon(_ relic: Relic, iconW: CGFloat, size: CGFloat) -> some View {
-        CroppedSprite(name: relic.iconName, contentW: 0.578, contentH: 0.266, targetH: size)
-            .frame(width: iconW, height: size)
-            .contentShape(Rectangle())
-            .overlay(alignment: .top) {
-                // Only while the inventory is closed, so it doesn't double up.
-                if !showInventory, relicTooltipId == relic.id {
-                    relicTooltipBubble(relic)
-                        .offset(y: -(size * 2.6))
-                        .zIndex(50)
-                }
-            }
-            .onTapGesture { showInventory = true }
-            .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
-                withAnimation(.easeInOut(duration: 0.2)) { relicTooltipId = pressing ? relic.id : nil }
-            }, perform: {})
-    }
-
-    /// One relic slot inside the inventory grid. Every owned relic is active — there is
-    /// no equip toggle; hold a slot to read its description.
-    private func inventoryRelicSlot(_ relic: Relic, size: CGFloat) -> some View {
-        // Icon fits inside the square with padding (wide art → scale by width).
-        CroppedSprite(name: relic.iconName, contentW: 0.578, contentH: 0.266, targetH: size * 0.34)
-            .frame(width: size, height: size)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.30)))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.goldBorder.opacity(0.6), lineWidth: 1.5))
-            .overlay(alignment: .bottom) {
-                // Below the slot so it isn't hidden behind the "RELICS" header.
-                if relicTooltipId == relic.id {
-                    relicTooltipBubble(relic)
-                        .offset(y: size * 0.85)
-                        .zIndex(50)
-                }
-            }
-            .contentShape(Rectangle())
-            .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
-                withAnimation(.easeInOut(duration: 0.2)) { relicTooltipId = pressing ? relic.id : nil }
-            }, perform: {})
-    }
-
-    /// The centered relic inventory modal.
-    @ViewBuilder
-    private func inventoryOverlay(unit: CGFloat) -> some View {
-        let boxW = min(unit * 0.62, 460)
-        let boxH = min(unit * 0.55, 420)
-        let slotSize = unit * 0.14
-        let headerFont = min(unit * 0.045, 30)
-
-        Color.black.opacity(0.6)
-            .ignoresSafeArea()
-            .contentShape(Rectangle())
-            .onTapGesture { relicTooltipId = nil; showInventory = false }
-
-        VStack(spacing: 0) {
-            HStack {
-                Text("RELICS")
-                    .font(.pixel(headerFont))
-                    .foregroundColor(.goldBright)
-                Spacer()
-                Button {
-                    relicTooltipId = nil
-                    showInventory = false
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: headerFont * 0.7, weight: .bold))
-                        .foregroundColor(.textParchment)
-                        .padding(8)
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
-            .padding(.bottom, 6)
-
-            Rectangle().fill(Color.goldBorder.opacity(0.5)).frame(height: 1)
-                .padding(.horizontal, 12)
-
-            if engine.playerRelics.isEmpty {
-                Text("You do not own any relics!\nDefeat Elite enemies to gain relics.")
-                    .font(.pixel(min(unit * 0.032, 22)))
-                    .foregroundColor(.textMuted)
-                    .multilineTextAlignment(.center)
-                    .padding(24)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: slotSize + 12), spacing: 12)],
-                        spacing: 12
-                    ) {
-                        ForEach(engine.playerRelics) { relic in
-                            inventoryRelicSlot(relic, size: slotSize)
-                        }
-                    }
-                    .padding(16)
-                }
-            }
-        }
-        .frame(width: boxW, height: boxH)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color(hex: 0x18122A)))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.goldBorder, lineWidth: 2))
-        .shadow(color: .black.opacity(0.6), radius: 20)
+        .background(RoundedRectangle(cornerRadius: 4).fill(Color(hex: 0x1A1428).opacity(0.97)))
+        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.goldBorder, lineWidth: 1))
     }
 
     // MARK: - Card Draft (Floor 3)
@@ -1186,57 +1151,87 @@ struct ContentView: View {
         engine.isResolvingTurn = false
     }
 
-    private func resolveTurn(size: CGSize) {
-        guard !engine.isResolvingTurn, engine.gameState == .playing else { return }
-        engine.isResolvingTurn = true
+    /// Commit a dragged card immediately (it leaves the hand + spends energy) and queue
+    /// its effect. The queue resolves plays one at a time, so the player can keep firing
+    /// off cards without waiting for the previous one's animation to finish.
+    private func playCardNow(_ card: Card) {
+        guard engine.gameState == .playing, engine.canAfford(card) else { return }
         tooltipCardId = nil
+        let target = engine.targetIndex                 // capture the aim at play time
+        engine.commitCardPlay(card)                     // leave hand + spend energy now
+        pendingPlays.append(QueuedPlay(card: card, targetIndex: target))
+        processPendingPlays()                           // no-op if already running
+    }
 
-        // Snapshot what the player's selection will do before it's consumed.
-        let playerWillAttack = engine.selectedDealsDamage
-        let playerWillShield = engine.selectedGivesBlock
-        let playerAttackHitsAll = engine.selectedAttackHitsAll
+    /// Drain the play queue: park each card in the center (hold, fade), then apply its
+    /// effect + hit/shield animation, one after another.
+    private func processPendingPlays() {
+        guard !isProcessingPlays else { return }
+        isProcessingPlays = true
 
         Task { @MainActor in
-            // 1. Short beat after pressing End Turn — the player's hand stays on screen.
-            try? await Task.sleep(for: .seconds(0.35))
+            while !pendingPlays.isEmpty {
+                let play = pendingPlays.removeFirst()
+                let card = play.card
 
-            // 2. Resolve the player's cards, then play their animation.
-            // Cleave hits every enemy, so the hit VFX plays on all living enemies
-            // (captured before they resolve); a normal attack plays on the target only.
-            let attackedIndices: [Int] = playerAttackHitsAll
-                ? engine.enemies.indices.filter { engine.enemies[$0].isAlive }
-                : [engine.targetIndex]
-            engine.playSelectedCards()
-            if playerWillAttack {
-                for idx in attackedIndices { setEnemyVFX(.attack, at: idx) }
+                // 1. Park the card in the center so the player registers what they played.
+                resolvingCard = card
+                resolvingCardOpacity = 1.0
+                try? await Task.sleep(for: .seconds(0.6))
+
+                // 2. Fade it away.
+                withAnimation(.easeIn(duration: 0.28)) { resolvingCardOpacity = 0.0 }
+                try? await Task.sleep(for: .seconds(0.28))
+                resolvingCard = nil
+
+                // 3. Apply the effect + VFX. Cleave hits every enemy still alive right now;
+                // a normal attack hits the target the player aimed at when they played it.
+                let willAttack = card.damage > 0
+                let willShield = card.block > 0
+                let attackedIndices: [Int] = card.hitsAllEnemies
+                    ? engine.enemies.indices.filter { engine.enemies[$0].isAlive }
+                    : [play.targetIndex]
+                engine.resolveCardEffect(card, targetIndex: play.targetIndex)
+
+                if willAttack { for idx in attackedIndices { setEnemyVFX(.attack, at: idx) } }
+                if willShield { setPlayerVFX(.healDebuff) }
+                let anim = max(willAttack ? attackAnimDuration : 0, willShield ? healAnimDuration : 0)
+                if anim > 0 {
+                    try? await Task.sleep(for: .seconds(anim))
+                    clearVFX()
+                }
+
+                // Reveal a relic (only if the floor was cleared) and run the victory flow.
+                await revealEarnedRelicIfAny()
+                if engine.gameState != .playing {
+                    pendingPlays.removeAll()   // combat ended — drop any remaining queued cards
+                    if engine.gameState == .victory { await handleCombatWon() }
+                    isProcessingPlays = false
+                    return
+                }
             }
-            if playerWillShield { setPlayerVFX(.healDebuff) }
-            let playerAnim = max(playerWillAttack ? attackAnimDuration : 0,
-                                 playerWillShield ? healAnimDuration : 0)
-            if playerAnim > 0 {
-                try? await Task.sleep(for: .seconds(playerAnim))
-                clearVFX()
-            }
+            isProcessingPlays = false
+        }
+    }
 
-            // Reveal a relic the instant an elite died this turn (even mid-combat).
-            await revealEarnedRelicIfAny()
+    /// End the player's turn: run the enemies' moves, then deal a fresh hand. Card play
+    /// happens live during the turn now, so this no longer plays any of the player's cards.
+    private func endPlayerTurn(size: CGSize) {
+        guard !engine.isResolvingTurn, !isProcessingPlays, engine.gameState == .playing else { return }
+        engine.isResolvingTurn = true
+        tooltipCardId = nil
+        engine.clearSelection()   // drop any selected-but-unplayed cards
 
-            // Combat may have ended on the player's turn.
-            if engine.gameState == .victory {
-                await handleCombatWon()
-                return
-            }
-            if engine.gameState != .playing { engine.isResolvingTurn = false; return }
+        Task { @MainActor in
+            // 1. Short beat after End Turn.
+            try? await Task.sleep(for: .seconds(0.3))
 
-            // 3. Let the result sink in before the enemy acts.
-            try? await Task.sleep(for: .seconds(comprehendPause))
-
-            // 4. Enemy turn notification — dim the hand so cards read as unplayable.
+            // 2. Enemy turn notification — dim the hand so cards read as unplayable.
             withAnimation(.easeInOut(duration: 0.25)) { isEnemyTurn = true }
             await showBanner(.enemyTurn, hold: 0.9)
             try? await Task.sleep(for: .seconds(0.3))
 
-            // 5. Resolve the enemies' queued moves, then play their animations.
+            // 3. Resolve the enemies' queued moves, then play their animations.
             let enemyWillAttack = engine.anyEnemyAttacks
             let buffingIndices = engine.buffingEnemyIndices
             let enemyGooSpits = engine.anyEnemyGooSpits
@@ -1256,15 +1251,15 @@ struct ContentView: View {
 
             if engine.gameState != .playing { isEnemyTurn = false; engine.isResolvingTurn = false; return }
 
-            // 6. Let the enemy's result sink in.
+            // 4. Let the enemy's result sink in.
             try? await Task.sleep(for: .seconds(comprehendPause))
 
-            // 7. Player turn notification — restore the hand's brightness.
+            // 5. Player turn notification — restore the hand's brightness.
             withAnimation(.easeInOut(duration: 0.25)) { isEnemyTurn = false }
             await showBanner(.playerTurn, hold: 0.9)
             try? await Task.sleep(for: .seconds(0.3))
 
-            // 8. Now swap out the old hand and deal fresh cards.
+            // 6. Swap out the old hand and deal fresh cards.
             engine.discardHand()
             engine.beginNextTurn()
             engine.isResolvingTurn = false
