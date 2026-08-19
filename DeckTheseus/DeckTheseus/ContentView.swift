@@ -70,40 +70,75 @@ struct CroppedSprite: View {
 
 // MARK: - Health Hearts (Pixel Art)
 
-struct HealthHeartsView: View {
+/// A numeric HP bar: a fill proportional to current/max, with "cur/max" centered on top.
+struct HealthBarView: View {
     let currentHp: Int
     let maxHp: Int
-    let heartSize: CGFloat
-    var depleteFromLeft: Bool = false
+    let width: CGFloat
+    let height: CGFloat
 
-    private let hpPerHeart = 20
+    var body: some View {
+        let cur = max(0, currentHp)
+        let frac = maxHp > 0 ? CGFloat(cur) / CGFloat(maxHp) : 0
+        let radius = height * 0.28
+        ZStack {
+            RoundedRectangle(cornerRadius: radius).fill(Color.black.opacity(0.55))
+            GeometryReader { geo in
+                RoundedRectangle(cornerRadius: radius)
+                    .fill(LinearGradient(colors: [Color(hex: 0xE24A5C), Color(hex: 0xA81E36)],
+                                         startPoint: .top, endPoint: .bottom))
+                    .frame(width: geo.size.width * min(1, max(0, frac)))
+            }
+            Text("\(cur)/\(maxHp)")
+                .font(.pixel(height * 0.72))
+                .foregroundColor(.white)
+                .shadow(color: .black.opacity(0.85), radius: 1)
+        }
+        .frame(width: width, height: height)
+        .overlay(RoundedRectangle(cornerRadius: radius).stroke(Color.black.opacity(0.6), lineWidth: 1.5))
+    }
+}
 
-    private var heartCount: Int { max(1, (maxHp + hpPerHeart - 1) / hpPerHeart) }
+/// Floating combat text (damage / CRIT / DODGE / GUARD / heal) that rises and fades over
+/// a combatant. Re-fires whenever the flash's id changes.
+struct CombatFlashView: View {
+    let flash: CombatFlash?
+    let fontSize: CGFloat
+    @State private var rise: CGFloat = 0
+    @State private var opacity: Double = 0
 
-    private func heartImage(at index: Int) -> String {
-        // Which "logical" slot this display position maps to. When depleting
-        // from the left, the leftmost icon empties first (full hearts stay right).
-        let slot = depleteFromLeft ? (heartCount - 1 - index) : index
-        let heartHp = currentHp - slot * hpPerHeart
-        if heartHp >= 11 {
-            return "health_heart_full"
-        } else if heartHp >= 1 {
-            return "health_heart_half"
-        } else {
-            return "health_heart_none"
+    private func color(_ kind: FlashKind) -> Color {
+        switch kind {
+        case .damage:  return .white
+        case .crit:    return Color(hex: 0xFFD84A)
+        case .dodge:   return Color(hex: 0x7FD6FF)
+        case .guarded: return Color(hex: 0x9BE38B)
+        case .heal:    return Color(hex: 0x76E06A)
+        case .poison:  return Color(hex: 0xB84AE0)
         }
     }
 
     var body: some View {
-        HStack(spacing: -heartSize * 0.55) {
-            ForEach(Array(0..<heartCount), id: \.self) { index in
-                Image(heartImage(at: index))
-                    .resizable()
-                    .interpolation(.none)
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: heartSize, height: heartSize)
+        Group {
+            if let flash {
+                Text(flash.text)
+                    .font(.pixel(flash.kind == .crit ? fontSize * 1.3 : fontSize))
+                    .foregroundColor(color(flash.kind))
+                    .shadow(color: .black.opacity(0.9), radius: 2)
+                    .fixedSize()
+                    .offset(y: rise)
+                    .opacity(opacity)
+                    .task(id: flash.id) {
+                        rise = 0
+                        opacity = 1
+                        withAnimation(.easeOut(duration: 0.9)) {
+                            rise = -fontSize * 3
+                            opacity = 0
+                        }
+                    }
             }
         }
+        .allowsHitTesting(false)
     }
 }
 
@@ -156,6 +191,10 @@ struct EnemyView: View {
     let nameFont: CGFloat
     let statGap: CGFloat
     let pulsing: Bool
+    let barWidth: CGFloat     // narrower when many enemies, to clear the player's stats
+
+    // Which status badge is being hovered/held (shows its description bubble).
+    @State private var hoveredStatus: String? = nil
 
     var body: some View {
         VStack(spacing: statGap) {
@@ -185,24 +224,93 @@ struct EnemyView: View {
                         .shadow(color: Color.goldBright.opacity(0.8), radius: 6)
                         .offset(y: -heartSize * 0.35)
                 }
+
+                // Floating combat text (damage / CRIT).
+                CombatFlashView(flash: enemy.combatFlash, fontSize: heartSize * 0.42)
+                    .offset(y: -spriteH * 0.35)
             }
 
-            VStack(spacing: 0) {
-                HStack(spacing: 2) {
-                    HealthHeartsView(currentHp: enemy.currentHp, maxHp: enemy.maxHp, heartSize: heartSize)
+            VStack(spacing: heartSize * 0.06) {
+                HStack(spacing: 4) {
+                    HealthBarView(currentHp: enemy.currentHp, maxHp: enemy.maxHp,
+                                  width: barWidth, height: heartSize * 0.42)
                     ShieldView(block: enemy.currentBlock, size: heartSize * 0.30)
                 }
 
-                if enemy.vulnerableTurns > 0 {
-                    HStack(spacing: heartSize * 0.04) {
-                        ForEach(Array(0..<enemy.vulnerableTurns), id: \.self) { _ in
-                            CroppedSprite(name: "status_vulnerable", contentW: 0.234, contentH: 0.297, targetH: heartSize * 0.34)
+                // Status row below the bar (no overlap with the numeric bar).
+                // Hover / hold a badge to see what it does (and what its number means).
+                if enemy.vulnerableTurns > 0 || enemy.poison > 0 || enemy.weak > 0 || enemy.stun > 0 {
+                    HStack(spacing: heartSize * 0.06) {
+                        // Placeholder status badges (no sprites yet).
+                        if enemy.vulnerableTurns > 0 { statusBadge("VULN \(enemy.vulnerableTurns)", key: "vuln", color: Color(hex: 0xC0455E)) }
+                        if enemy.poison > 0 { statusBadge("PSN \(enemy.poison)", key: "psn", color: Color(hex: 0x8A3EB0)) }
+                        if enemy.weak > 0   { statusBadge("WEAK \(enemy.weak)", key: "weak", color: Color(hex: 0xC06A2E)) }
+                        if enemy.stun > 0   { statusBadge("STUN \(enemy.stun)", key: "stun", color: Color(hex: 0x3E7AC0)) }
+                    }
+                    .overlay(alignment: .bottom) {
+                        if let key = hoveredStatus, let info = statusInfo(key) {
+                            statusTooltip(info)
+                                .offset(y: -(heartSize * 0.55))
+                                .allowsHitTesting(false)
                         }
                     }
-                    .padding(.top, -heartSize * 0.42)
                 }
             }
         }
+    }
+
+    private func statusBadge(_ text: String, key: String, color: Color) -> some View {
+        Text(text)
+            .font(.pixel(heartSize * 0.28))
+            .foregroundColor(.white)
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(Capsule().fill(color))
+            // Hover (pointer) or hold (touch) reveals the description bubble.
+            .onHover { hovering in
+                if hovering { hoveredStatus = key }
+                else if hoveredStatus == key { hoveredStatus = nil }
+            }
+            .onLongPressGesture(minimumDuration: 0.2) {
+                hoveredStatus = (hoveredStatus == key) ? nil : key
+            }
+    }
+
+    /// Title + description for a status badge, with its number's meaning spelled out.
+    private func statusInfo(_ key: String) -> (title: String, desc: String)? {
+        switch key {
+        case "vuln":
+            return ("VULNERABLE \(enemy.vulnerableTurns)",
+                    "Takes +50% damage from your attacks per stack — now +\(enemy.vulnerableTurns * 50)%. Stacks add up and last the whole fight.")
+        case "psn":
+            return ("POISON \(enemy.poison)",
+                    "Loses 3 HP at the start of its turn, then 1 stack falls off. The number is how many turns of poison remain.")
+        case "weak":
+            return ("WEAK \(enemy.weak)",
+                    "Its attacks deal 25% less damage. The number is how many of its turns this lasts (−1 each turn).")
+        case "stun":
+            return ("STUN \(enemy.stun)",
+                    "Skips its turn entirely (poison still hurts it). The number is how many turns it stays stunned (−1 each turn).")
+        default:
+            return nil
+        }
+    }
+
+    private func statusTooltip(_ info: (title: String, desc: String)) -> some View {
+        VStack(spacing: 3) {
+            Text(info.title)
+                .font(.pixel(heartSize * 0.26))
+                .foregroundColor(.goldBright)
+            Text(info.desc)
+                .font(.pixel(heartSize * 0.22))
+                .foregroundColor(.textParchment)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 9).padding(.vertical, 7)
+        .frame(width: max(barWidth * 1.5, heartSize * 3.0))
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color(hex: 0x140E20)))   // fully opaque
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.goldBorder, lineWidth: 1.5))
+        .shadow(color: .black.opacity(0.5), radius: 8)
     }
 }
 
@@ -265,6 +373,12 @@ struct ContentView: View {
     @State private var revealedCardIds: Set<UUID> = []
     @State private var isEnemyTurn = false
 
+    // DEV floor picker: jump to any floor for testing.
+    @State private var showDevPanel = false
+
+    // Which stat's explanation bubble is showing in the character screen.
+    @State private var statTooltip: StatKind? = nil
+
     // Drag-to-play: which hand card is being dragged, and its live drag offset.
     @State private var draggingCardId: UUID? = nil
     @State private var cardDragOffset: CGSize = .zero
@@ -281,6 +395,14 @@ struct ContentView: View {
         let targetIndex: Int
     }
 
+    // Character / stats screen (view stats, invest points)
+    @State private var showCharacter = false
+    @State private var pendingAlloc: [StatKind: Int] = [:]
+    // .review = opened mid-run (Confirm just commits); .postVictory = the step after a win
+    // (Confirm commits AND advances to the next stage).
+    enum CharacterMode { case review, postVictory }
+    @State private var characterMode: CharacterMode = .review
+
     // Goo-spit projectile (boss → player)
     @State private var gooSpitActive = false
     @State private var gooSpitFrame = 0
@@ -296,6 +418,9 @@ struct ContentView: View {
     @State private var relicTooltipId: UUID? = nil
     @State private var earnedRelicBanner: Relic? = nil
     @State private var relicBannerContinuation: CheckedContinuation<Void, Never>? = nil
+    @State private var earnedEquipmentBanner: Equipment? = nil
+    @State private var equipmentBannerContinuation: CheckedContinuation<Void, Never>? = nil
+    @State private var comboBanner: String? = nil   // hidden-combo notification
 
     var body: some View {
         GeometryReader { geo in
@@ -339,41 +464,28 @@ struct ContentView: View {
                     }
 
                     goldDisplay(size: titleFont * 1.1)
+
+                    Button {
+                        pendingAlloc = [:]
+                        characterMode = .review
+                        showCharacter = true
+                    } label: {
+                        let n = engine.player.unspentStatPoints
+                        Text(n > 0 ? "STATS (\(n))" : "STATS")
+                            .font(.pixel(titleFont * 0.85))
+                            .foregroundColor(n > 0 ? .goldBright : .textMuted)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.4)))
+                            .overlay(RoundedRectangle(cornerRadius: 4)
+                                .stroke((n > 0 ? Color.goldBright : Color.goldBorder).opacity(0.7), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 12)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .zIndex(700)   // keep the HUD (and relic tooltips) above the arena
-
-                // DEV ONLY — instant-win the fight to speed up testing.
-                if engine.gameState == .playing {
-                    Button {
-                        guard engine.gameState == .playing, !engine.isResolvingTurn, !isProcessingPlays else { return }
-                        isEnemyTurn = false
-                        engine.devWinCombat()          // kills all enemies, awards relic, marks .victory
-                        Task { @MainActor in
-                            await handleCombatWon()    // relic reveal → victory screen
-                        }
-                    } label: {
-                        Text("SKIP \u{25B6}")
-                            .font(.pixel(titleFont * 0.9))
-                            .foregroundColor(Color(hex: 0xE0C0F0))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(Color(hex: 0x2A1E3A).opacity(0.85))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .stroke(Color(hex: 0x6A4A8A), lineWidth: 1.5)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.trailing, 20)
-                    .padding(.top, geo.size.height * 0.12)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                }
 
                 // Player (LEFT) — compact: name, sprite, hearts+shield all adjacent, left-aligned
                 VStack(alignment: .leading, spacing: statGap) {
@@ -393,14 +505,15 @@ struct ContentView: View {
                         .overlay {
                             SpriteVFXView(vfx: engine.playerVFX, size: playerSpriteH * 0.9)
                         }
+                        .overlay(alignment: .top) {
+                            CombatFlashView(flash: engine.player.combatFlash, fontSize: heartSize * 0.42)
+                                .offset(y: -playerSpriteH * 0.2)
+                        }
                         .frame(height: bossSpriteH, alignment: .bottom)   // stand on the same ground as the boss
 
-                    HStack(spacing: 2) {
-                        HealthHeartsView(
-                            currentHp: engine.player.currentHp,
-                            maxHp: engine.player.maxHp,
-                            heartSize: heartSize
-                        )
+                    HStack(spacing: 4) {
+                        HealthBarView(currentHp: engine.player.currentHp, maxHp: engine.player.maxHp,
+                                      width: heartSize * 1.9, height: heartSize * 0.42)
 
                         ShieldView(block: engine.displayPlayerBlock, size: heartSize * 0.30)
                     }
@@ -408,6 +521,7 @@ struct ContentView: View {
                 .padding(.top, spriteTopPad)
                 .padding(.leading, sideMargin)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .zIndex(5)   // player stats draw above the enemy cluster if they ever meet
 
                 // Enemies (RIGHT) — one or more; tap a sprite to target it.
                 // Each enemy's display size comes from its own spriteScale so it's
@@ -421,6 +535,9 @@ struct ContentView: View {
                           let c = engine.deck.hand.first(where: { $0.id == id }) else { return false }
                     return c.hitsAllEnemies && c.damage > 0
                 }()
+                // Narrow the enemy bars when the cluster is crowded so it stays on the
+                // right and doesn't reach into the player's health/shield.
+                let enemyBarW = heartSize * (engine.enemies.count >= 3 ? 1.45 : 1.9)
                 HStack(alignment: .top, spacing: heartSize * 0.1) {
                     ForEach(Array(engine.enemies.enumerated()), id: \.element.id) { index, enemy in
                         EnemyView(
@@ -431,7 +548,8 @@ struct ContentView: View {
                             heartSize: heartSize,
                             nameFont: nameFont,
                             statGap: statGap,
-                            pulsing: enemyPulsing
+                            pulsing: enemyPulsing,
+                            barWidth: enemyBarW
                         )
                         .contentShape(Rectangle())
                         .onTapGesture {
@@ -478,7 +596,7 @@ struct ContentView: View {
                         PixelImage(name: "hud_energy_orb", width: orbSize * 0.7, height: orbSize * 0.7)
                             .shadow(color: Color(hex: 0xA040D0).opacity(0.6), radius: 10)
 
-                        Text("\(engine.remainingEnergy)/\(engine.player.maxEnergy)")
+                        Text("\(engine.remainingEnergy)/\(engine.effectiveMaxEnergy)")
                             .font(.pixel(orbSize * 0.45))
                             .foregroundColor(Color(hex: 0xE0C0F0))
                     }
@@ -677,6 +795,76 @@ struct ContentView: View {
                     .zIndex(950)
                 }
 
+                // Equipment-drop reveal.
+                if let item = earnedEquipmentBanner {
+                    ZStack {
+                        Color.black.opacity(0.65).ignoresSafeArea()
+
+                        VStack(spacing: unit * 0.025) {
+                            Text("EQUIPMENT FOUND!")
+                                .font(.pixel(min(unit * 0.07, 48)))
+                                .foregroundColor(Color(hex: 0x8FD0FF))
+                                .shadow(color: Color(hex: 0x8FD0FF).opacity(0.7), radius: 14)
+
+                            Text(item.name)
+                                .font(.pixel(min(unit * 0.055, 38)))
+                                .foregroundColor(.textParchment)
+
+                            Text(item.slot.label)
+                                .font(.pixel(min(unit * 0.03, 20)))
+                                .foregroundColor(.textMuted)
+
+                            Text(item.bonusSummary)
+                                .font(.pixel(min(unit * 0.038, 26)))
+                                .foregroundColor(.goldBright)
+
+                            Text("Tap anywhere to close")
+                                .font(.pixel(min(unit * 0.028, 18)))
+                                .foregroundColor(Color(hex: 0x6A5A78))
+                                .padding(.top, unit * 0.015)
+                        }
+                        .padding(.horizontal, unit * 0.06)
+                        .padding(.vertical, unit * 0.05)
+                        .background(RoundedRectangle(cornerRadius: 14).fill(Color(hex: 0x141C2A).opacity(0.96)))
+                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color(hex: 0x5FA8E0), lineWidth: 3))
+                        .shadow(color: Color(hex: 0x5FA8E0).opacity(0.4), radius: 24)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        equipmentBannerContinuation?.resume()
+                        equipmentBannerContinuation = nil
+                    }
+                    .transition(.opacity)
+                    .zIndex(950)
+                }
+
+                // Character / stats screen — above everything (incl. the victory overlay).
+                if showCharacter {
+                    characterOverlay(unit: unit)
+                        .zIndex(1200)
+                }
+
+                // Hidden-combo notification.
+                if let combo = comboBanner {
+                    VStack(spacing: 2) {
+                        Text("\u{2726} COMBO! \u{2726}")
+                            .font(.pixel(min(unit * 0.055, 38)))
+                            .foregroundColor(Color(hex: 0xFFD84A))
+                        Text(combo)
+                            .font(.pixel(min(unit * 0.08, 54)))
+                            .foregroundColor(.white)
+                    }
+                    .padding(.horizontal, unit * 0.05)
+                    .padding(.vertical, unit * 0.025)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(Color.black.opacity(0.72)))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(hex: 0xFFD84A), lineWidth: 3))
+                    .shadow(color: Color(hex: 0xFFD84A).opacity(0.6), radius: 18)
+                    .position(x: geo.size.width / 2, y: geo.size.height * 0.34)
+                    .transition(.scale(scale: 0.7).combined(with: .opacity))
+                    .allowsHitTesting(false)
+                    .zIndex(860)
+                }
+
                 // Turn-state notifier banner
                 if engine.turnBanner != .none {
                     let isPlayer = engine.turnBanner == .playerTurn
@@ -718,20 +906,12 @@ struct ContentView: View {
                     } else if engine.gameState == .defeat {
                         defeatOverlay(unit: unit, btnFontSize: btnFontSize)
                             .zIndex(999)
+                    } else if engine.gameState == .shop {
+                        shopOverlay(unit: unit, btnFontSize: btnFontSize)
+                            .zIndex(999)
                     } else {
                         VStack(spacing: 20) {
                             switch engine.gameState {
-                            case .shop:
-                                overlayTitle("SHOP", size: titleFontSize * 0.75, color: .goldBright)
-                                Text("The merchant is still setting up shop...")
-                                    .font(.pixel(btnFontSize))
-                                    .foregroundColor(.textParchment)
-                                overlayButton("LEAVE SHOP", fontSize: btnFontSize) {
-                                    isEnemyTurn = false
-                                    engine.leaveShop()
-                                    if engine.gameState == .playing { dealNewHand() }
-                                }
-
                             case .restSite:
                                 overlayTitle("REST SITE", size: titleFontSize * 0.75, color: .goldBright)
                                 Text("Recover your strength, or train a new technique.")
@@ -756,12 +936,55 @@ struct ContentView: View {
                                     .font(.pixel(btnFontSize * 1.2))
                                     .foregroundColor(.textParchment)
 
-                            case .victory, .defeat, .drafting, .playing:
+                            case .victory, .defeat, .shop, .drafting, .playing:
                                 EmptyView()
                             }
                         }
                         .zIndex(999)
                     }
+                }
+
+                // DEV tools (top-right) — floor picker (always) + instant-win SKIP (in combat).
+                VStack(alignment: .trailing, spacing: 8) {
+                    Button {
+                        showDevPanel = true
+                    } label: {
+                        Text("DEV \u{25BC}")
+                            .font(.pixel(titleFont * 0.85))
+                            .foregroundColor(Color(hex: 0xE0C0F0))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(RoundedRectangle(cornerRadius: 4).fill(Color(hex: 0x2A1E3A).opacity(0.85)))
+                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color(hex: 0x6A4A8A), lineWidth: 1.5))
+                    }
+                    .buttonStyle(.plain)
+
+                    if engine.gameState == .playing {
+                        Button {
+                            guard engine.gameState == .playing, !engine.isResolvingTurn, !isProcessingPlays else { return }
+                            isEnemyTurn = false
+                            engine.devWinCombat()          // kills all enemies, awards relic, marks .victory
+                            Task { @MainActor in await handleCombatWon() }
+                        } label: {
+                            Text("SKIP \u{25B6}")
+                                .font(.pixel(titleFont * 0.85))
+                                .foregroundColor(Color(hex: 0xE0C0F0))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(RoundedRectangle(cornerRadius: 4).fill(Color(hex: 0x2A1E3A).opacity(0.85)))
+                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color(hex: 0x6A4A8A), lineWidth: 1.5))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.trailing, 20)
+                .padding(.top, 52)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                .zIndex(1500)
+
+                if showDevPanel {
+                    devPanel(unit: unit)
+                        .zIndex(1600)
                 }
             }
         }
@@ -772,6 +995,85 @@ struct ContentView: View {
             enemyPulsing = true
             dealNewHand()
         }
+    }
+
+    // MARK: - DEV floor picker
+
+    /// Short label for each floor so the picker is easy to scan.
+    private static let devFloors: [(Int, String)] = [
+        (1, "1"), (2, "2"), (3, "3"), (4, "4 · Rest"), (5, "5 · Elite"),
+        (6, "6"), (7, "7"), (8, "8"), (9, "9 · Mini"), (10, "10 · Rest"),
+        (11, "11"), (12, "12"), (13, "13 · Elite"), (14, "14"), (15, "15"),
+        (16, "16 · Rest"), (17, "17"), (18, "18 · Boss"), (19, "19 · Done")
+    ]
+
+    /// Reset transient view/animation state after a dev jump, then deal a fresh hand
+    /// if we landed in combat.
+    private func resetForDevJump() {
+        isEnemyTurn = false
+        isProcessingPlays = false
+        pendingPlays.removeAll()
+        resolvingCard = nil
+        resolvingCardOpacity = 1.0
+        draggingCardId = nil
+        cardDragOffset = .zero
+        engine.isResolvingTurn = false
+        engine.selectedCardIds.removeAll()
+        showCharacter = false
+        showDevPanel = false
+        if engine.gameState == .playing { dealNewHand() }
+    }
+
+    @ViewBuilder
+    private func devPanel(unit: CGFloat) -> some View {
+        let f = min(unit * 0.030, 20.0)
+        ZStack {
+            Color.black.opacity(0.8)
+                .ignoresSafeArea()
+                .onTapGesture { showDevPanel = false }
+
+            VStack(spacing: 14) {
+                HStack {
+                    Text("DEV — GO TO STAGE")
+                        .font(.pixel(f * 1.1))
+                        .foregroundColor(.goldBright)
+                    Spacer()
+                    Button { showDevPanel = false } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: f * 1.3))
+                            .foregroundColor(.textMuted)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: unit * 0.14), spacing: 8)], spacing: 8) {
+                    devJumpButton("Shop", font: f) { engine.devJumpToShop(); resetForDevJump() }
+                    ForEach(Self.devFloors, id: \.0) { floor, label in
+                        devJumpButton(label, font: f) { engine.devJumpToFloor(floor); resetForDevJump() }
+                    }
+                }
+            }
+            .padding(20)
+            .frame(maxWidth: min(unit * 0.9, 560))
+            .background(RoundedRectangle(cornerRadius: 14).fill(Color(hex: 0x1A1420).opacity(0.97)))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.goldBorder, lineWidth: 2))
+            .padding(24)
+        }
+    }
+
+    private func devJumpButton(_ label: String, font: CGFloat, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(.pixel(font * 0.85))
+                .foregroundColor(.textParchment)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(RoundedRectangle(cornerRadius: 5).fill(Color.black.opacity(0.45)))
+                .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.goldBorder.opacity(0.7), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Overlay Helpers
@@ -859,6 +1161,317 @@ struct ContentView: View {
             }, perform: {})
     }
 
+    // MARK: - Character / Stats screen
+
+    /// Effective stats (allocations + equipped gear) merged with the pending (uncommitted)
+    /// allocation — the true preview of what the derived stats will be.
+    private func mergedAllocations() -> [StatKind: Int] {
+        var m = engine.player.effectiveStats
+        for (k, v) in pendingAlloc { m[k, default: 0] += v }
+        return m
+    }
+
+    private func characterOverlay(unit: CGFloat) -> some View {
+        let headerFont = min(unit * 0.05, 32)
+        let bodyFont = min(unit * 0.03, 20)
+        let boxW = min(unit * 1.3, 860)
+        let boxH = min(unit * 0.9, 700)
+        let isPostVictory = characterMode == .postVictory
+
+        let merged = mergedAllocations()
+        let d = DerivedStats.derive(merged)
+        let previewMaxHp = engine.player.baseMaxHp + (merged[.con] ?? 0)
+        let pendingTotal = pendingAlloc.values.reduce(0, +)
+        let remaining = engine.player.unspentStatPoints - pendingTotal
+
+        return ZStack {
+            Color.black.opacity(0.78).ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { pendingAlloc = [:]; showCharacter = false }
+
+            VStack(spacing: unit * 0.014) {
+                HStack {
+                    Text(isPostVictory ? "ALLOCATE POINTS" : "CHARACTER")
+                        .font(.pixel(headerFont)).foregroundColor(.goldBright)
+                    Spacer()
+                    Text("Points: \(remaining)")
+                        .font(.pixel(bodyFont * 1.1))
+                        .foregroundColor(remaining > 0 ? .goldBright : .textMuted)
+                    Button { pendingAlloc = [:]; showCharacter = false } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: headerFont * 0.7, weight: .bold))
+                            .foregroundColor(.textParchment).padding(6)
+                    }.buttonStyle(.plain)
+                }
+
+                // Stat allocator (▲ / LABEL (value) / ▼). Lifted above the STATS grid so a
+                // stat tooltip (which overflows downward) paints on top of it, not behind.
+                HStack(alignment: .top, spacing: unit * 0.006) {
+                    ForEach(StatKind.allCases) { stat in
+                        statColumn(stat, remaining: remaining, bodyFont: bodyFont)
+                    }
+                }
+                .zIndex(10)
+
+                Rectangle().fill(Color.goldBorder.opacity(0.5)).frame(height: 1)
+
+                // Two columns: derived stats (left) and equipment (right). Both size to
+                // content; the inventory scroll area below has a fixed height so it's usable.
+                HStack(alignment: .top, spacing: unit * 0.02) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("STATS").font(.pixel(bodyFont * 1.1)).foregroundColor(.goldBright)
+                        derivedStatsGrid(d, maxHp: previewMaxHp, bodyFont: bodyFont)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+
+                    Rectangle().fill(Color.goldBorder.opacity(0.4)).frame(maxHeight: .infinity).frame(width: 1)
+
+                    equipmentPanel(bodyFont: bodyFont, unit: unit)
+                }
+
+                Spacer(minLength: 0)
+
+                Button {
+                    engine.commitAllocations(pendingAlloc)
+                    pendingAlloc = [:]
+                    if isPostVictory {
+                        showCharacter = false
+                        isEnemyTurn = false
+                        engine.advanceFloor()              // onto the next stage
+                        if engine.gameState == .playing { dealNewHand() }
+                    }
+                } label: {
+                    let enabled = isPostVictory || pendingTotal > 0
+                    Text(isPostVictory ? "Next Stage \u{25B6}" : "Confirm")
+                        .font(.pixel(bodyFont * 1.1))
+                        .foregroundColor(enabled ? .white : .textMuted)
+                        .padding(.horizontal, 36).padding(.vertical, 9)
+                        .background(RoundedRectangle(cornerRadius: 6)
+                            .fill(enabled ? Color(hex: 0x2C6E3C) : Color(hex: 0x241E36)))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.goldBorder, lineWidth: 2))
+                }
+                .buttonStyle(.plain)
+                .disabled(!isPostVictory && pendingTotal == 0)
+            }
+            .padding(unit * 0.028)
+            .frame(width: boxW, height: boxH)
+            .background(RoundedRectangle(cornerRadius: 12).fill(Color(hex: 0x18122A)))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.goldBorder, lineWidth: 2))
+            .shadow(color: .black.opacity(0.6), radius: 24)
+        }
+    }
+
+    private func statColumn(_ stat: StatKind, remaining: Int, bodyFont: CGFloat) -> some View {
+        // Show the EFFECTIVE stat (allocated points + equipped gear), plus any pending.
+        let current = engine.player.effectiveStats[stat] ?? 0
+        let pending = pendingAlloc[stat] ?? 0
+        let total = current + pending
+        return VStack(spacing: 2) {
+            Button {
+                if remaining > 0 { pendingAlloc[stat, default: 0] += 1 }
+            } label: {
+                Image(systemName: "chevron.up.circle.fill")
+                    .font(.system(size: bodyFont * 0.95))
+                    .foregroundColor(remaining > 0 ? .goldBright : Color(hex: 0x4A4258))
+            }
+            .buttonStyle(.plain).disabled(remaining <= 0)
+
+            // The label is the tooltip target — hover (pointer) or hold (touch) to learn
+            // what the stat does. A "?" hint marks it as inspectable.
+            HStack(spacing: 2) {
+                Text(stat.label).font(.pixel(bodyFont)).foregroundColor(.textParchment)
+                Text("?").font(.pixel(bodyFont * 0.7)).foregroundColor(.goldBorder)
+            }
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                if hovering { statTooltip = stat }
+                else if statTooltip == stat { statTooltip = nil }
+            }
+            .onLongPressGesture(minimumDuration: 0.2) {
+                statTooltip = (statTooltip == stat) ? nil : stat
+            }
+
+            Text("(\(total))")
+                .font(.pixel(bodyFont * 0.9))
+                .foregroundColor(pending > 0 ? .goldBright : .textMuted)
+
+            Button {
+                if pending > 0 { pendingAlloc[stat, default: 0] -= 1 }
+            } label: {
+                Image(systemName: "chevron.down.circle.fill")
+                    .font(.system(size: bodyFont * 0.95))
+                    .foregroundColor(pending > 0 ? .goldBright : Color(hex: 0x4A4258))
+            }
+            .buttonStyle(.plain).disabled(pending <= 0)
+        }
+        .frame(maxWidth: .infinity)
+        // Edge columns anchor their bubble inward (leading for the first stat, trailing for
+        // the last) so it doesn't overflow past the panel border; middle columns center.
+        .overlay(alignment: tooltipAlignment(stat)) {
+            if statTooltip == stat {
+                statInfoBubble(stat, total: total, bodyFont: bodyFont)
+                    .offset(y: bodyFont * 4.6)   // drop the bubble just below the column
+                    .zIndex(300)
+            }
+        }
+    }
+
+    /// Keep the first/last stat's tooltip inside the panel by anchoring it inward.
+    private func tooltipAlignment(_ stat: StatKind) -> Alignment {
+        switch stat {
+        case .str: return .topLeading
+        case .cha: return .topTrailing
+        default:   return .top
+        }
+    }
+
+    /// Title + plain-language description for a stat, with its live numbers/breakpoints filled in.
+    private func statInfo(_ stat: StatKind, total: Int) -> (title: String, desc: String) {
+        switch stat {
+        case .str:
+            return ("STR — Power",
+                    "Raises your Guard chance (block part of an incoming hit) and your Crit damage.")
+        case .dex:
+            return ("DEX — Agility",
+                    "Raises your Dodge chance (fully avoid a hit) and your Crit chance.")
+        case .con:
+            return ("CON — Toughness",
+                    "+1 Max HP per point, and raises Guard reduction (how much a guarded hit is cut).")
+        case .int:
+            let toNext = 15 - (total % 15)
+            return ("INT — Focus",
+                    "+1 Max Energy every 15 INT — next in \(toNext). Plus a small chance for +1 energy at turn start.")
+        case .fth:
+            return ("FTH — Spirit",
+                    "Heals you receive are stronger. Heal \(total / 5) HP after each combat, and lifesteal heals +\(total / 10).")
+        case .lck:
+            return ("LCK — Fortune",
+                    "+\(min(75, total))% equipment-drop chance and +\(total)% gold from enemies.")
+        case .cha:
+            let extra = total / 20
+            let disc = min(50, Int((Double(total) * 0.6).rounded()))
+            return ("CHA — Charm",
+                    "\(disc)% off shop prices" + (extra > 0 ? " and +\(extra) extra shop cards." : " (extra cards every 20 CHA)."))
+        }
+    }
+
+    private func statInfoBubble(_ stat: StatKind, total: Int, bodyFont: CGFloat) -> some View {
+        let info = statInfo(stat, total: total)
+        return VStack(spacing: 3) {
+            Text(info.title).font(.pixel(bodyFont * 0.95)).foregroundColor(.goldBright)
+            Text(info.desc)
+                .font(.pixel(bodyFont * 0.82)).foregroundColor(.textParchment)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .frame(width: bodyFont * 11)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color(hex: 0x140E20)))   // fully opaque
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.goldBorder, lineWidth: 1.5))
+        .shadow(color: .black.opacity(0.6), radius: 8)
+        .allowsHitTesting(false)
+    }
+
+    private func derivedStatsGrid(_ d: DerivedStats, maxHp: Int, bodyFont: CGFloat) -> some View {
+        func pct(_ v: Double) -> String { String(format: "%.1f%%", v * 100) }
+        let rows: [(String, String)] = [
+            ("Max HP", "\(maxHp)"),
+            ("Bonus Energy", "+\(d.bonusEnergy)"),
+            ("Crit Chance", pct(d.critChance)),
+            ("Crit Damage", String(format: "%.0f%%", d.critDamage * 100)),
+            ("Guard Chance", pct(d.guardChance)),
+            ("Guard Reduction", pct(d.guardDR)),
+            ("Dodge Chance", pct(d.dodgeChance)),
+            ("Energy Gain", pct(d.energyGainChance)),
+            ("Incoming Heal", pct(d.incomingHeal)),
+            ("Combat-End Heal", "\(d.combatEndHeal) HP"),
+            ("Lifesteal Bonus", "+\(d.lifestealAmount)"),
+            ("Lucky Drop", pct(d.luckyDrop)),
+            ("Gold Find", "+" + pct(d.goldFind)),
+            ("Shop Discount", pct(d.shopDiscount)),
+            ("Shop Cards", "+\(d.shopExtraCards)"),
+        ]
+        return LazyVGrid(
+            columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)],
+            spacing: 6
+        ) {
+            ForEach(rows, id: \.0) { row in
+                HStack(spacing: 6) {
+                    Text(row.0).font(.pixel(bodyFont)).foregroundColor(.textMuted)
+                    Spacer(minLength: 4)
+                    Text(row.1).font(.pixel(bodyFont)).foregroundColor(.textParchment)
+                }
+            }
+        }
+    }
+
+    // MARK: - Equipment panel (in the character screen)
+
+    private func equipmentPanel(bodyFont: CGFloat, unit: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("EQUIPMENT").font(.pixel(bodyFont * 1.1)).foregroundColor(.goldBright)
+
+            // One row per slot; tap an equipped item to unequip it.
+            ForEach(EquipmentSlot.allCases) { slot in
+                HStack(spacing: 6) {
+                    Text(slot.label).font(.pixel(bodyFont * 0.95)).foregroundColor(.textMuted)
+                        .frame(width: bodyFont * 3.2, alignment: .leading)
+                    if let item = engine.player.equippedItems[slot] {
+                        Button { engine.unequip(slot) } label: {
+                            HStack(spacing: 4) {
+                                Text(item.name).font(.pixel(bodyFont * 0.95)).foregroundColor(.textParchment)
+                                    .lineLimit(1)
+                                Spacer(minLength: 2)
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: bodyFont * 0.9)).foregroundColor(Color(hex: 0xCC6677))
+                            }
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(RoundedRectangle(cornerRadius: 4).fill(Color.goldAccent.opacity(0.20)))
+                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.goldBorder.opacity(0.6), lineWidth: 1))
+                        }.buttonStyle(.plain)
+                    } else {
+                        Text("Empty").font(.pixel(bodyFont * 0.95)).foregroundColor(Color(hex: 0x5A5268))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.25)))
+                    }
+                }
+            }
+
+            Text("INVENTORY").font(.pixel(bodyFont * 1.1)).foregroundColor(.goldBright).padding(.top, 2)
+            ScrollView {
+                VStack(spacing: 4) {
+                    if engine.player.equipmentInventory.isEmpty {
+                        Text("No spare equipment.")
+                            .font(.pixel(bodyFont * 0.9)).foregroundColor(.textMuted)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
+                    } else {
+                        ForEach(engine.player.equipmentInventory) { item in
+                            Button { engine.equip(item) } label: {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    HStack {
+                                        Text(item.name).font(.pixel(bodyFont)).foregroundColor(.textParchment)
+                                        Spacer()
+                                        Text(item.slot.label).font(.pixel(bodyFont * 0.85)).foregroundColor(.textMuted)
+                                    }
+                                    Text(item.bonusSummary).font(.pixel(bodyFont * 0.85)).foregroundColor(.goldBright)
+                                }
+                                .padding(.horizontal, 6).padding(.vertical, 4)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.3)))
+                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.goldBorder.opacity(0.4), lineWidth: 1))
+                            }.buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+            // Fixed height → always a usable, scrollable region regardless of item count.
+            .frame(height: unit * 0.2)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
     // MARK: - Result Screens (Victory / Defeat)
 
     /// Shared end-of-combat scaffold: Act-Floor header + title banner, the hero in the
@@ -896,6 +1509,13 @@ struct ContentView: View {
             // Rewards bar (empty on defeat).
             rewardsBar(unit: unit, showRewards: showRewards)
 
+            if showRewards && engine.lastStatPoints > 0 {
+                Text("+\(engine.lastStatPoints) Stat Points")
+                    .font(.pixel(min(unit * 0.032, 22)))
+                    .foregroundColor(.goldBright)
+                    .padding(.top, unit * 0.012)
+            }
+
             // Buttons — right-aligned below the bar.
             HStack(spacing: unit * 0.025) {
                 Spacer()
@@ -914,10 +1534,11 @@ struct ContentView: View {
             victoryButton("Exit", fontSize: btnFontSize, tint: Color(hex: 0x4A90C2)) {
                 // No-op for now — returns to the Map once the mapping system exists.
             }
-            victoryButton("Next Stage", fontSize: btnFontSize, tint: Color(hex: 0x5BA84F)) {
-                isEnemyTurn = false
-                engine.advanceFloor()
-                if engine.gameState == .playing { dealNewHand() }
+            // "Next" opens the full stats page; confirming there advances to the next stage.
+            victoryButton("Next", fontSize: btnFontSize, tint: Color(hex: 0x5BA84F)) {
+                pendingAlloc = [:]
+                characterMode = .postVictory
+                showCharacter = true
             }
         }
     }
@@ -1010,6 +1631,136 @@ struct ContentView: View {
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.55), lineWidth: 2))
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: - Shop
+
+    @ViewBuilder
+    private func shopOverlay(unit: CGFloat, btnFontSize: CGFloat) -> some View {
+        let headerFont = min(unit * 0.06, 42)
+        let bodyFont = min(unit * 0.03, 20)
+        let cardH = min(unit * 0.24, 175)
+        let cardW = cardH * 0.72
+
+        VStack(spacing: unit * 0.02) {
+            HStack {
+                Text("SHOP").font(.pixel(headerFont)).foregroundColor(.goldBright)
+                Spacer()
+                HStack(spacing: 6) {
+                    goldCoin(size: bodyFont * 1.2)
+                    Text("\(engine.player.gold)").font(.pixel(bodyFont * 1.2)).foregroundColor(.goldBright)
+                }
+            }
+            .padding(.horizontal, unit * 0.04)
+            .padding(.top, unit * 0.02)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: unit * 0.025) {
+                    Text("CARDS").font(.pixel(bodyFont * 1.2)).foregroundColor(.goldBright)
+                    HStack(alignment: .top, spacing: unit * 0.012) {
+                        ForEach(engine.shopCards) { offer in
+                            VStack(spacing: 4) {
+                                CardView(card: offer.card, isSelected: false,
+                                         isAffordable: !offer.sold && engine.player.gold >= offer.price,
+                                         showTooltip: tooltipCardId == offer.card.id,
+                                         cardWidth: cardW, cardHeight: cardH)
+                                    .opacity(offer.sold ? 0.3 : 1)
+                                    .onLongPressGesture(minimumDuration: 0.3, pressing: { p in
+                                        tooltipCardId = p ? offer.card.id : nil
+                                    }, perform: {})
+                                if offer.sold {
+                                    Text("SOLD").font(.pixel(bodyFont)).foregroundColor(.textMuted)
+                                } else {
+                                    shopBuyButton(price: offer.price, bodyFont: bodyFont) { engine.buyCard(offer) }
+                                }
+                            }
+                        }
+                    }
+
+                    Text("RELICS").font(.pixel(bodyFont * 1.2)).foregroundColor(.goldBright)
+                    HStack(alignment: .top, spacing: unit * 0.02) {
+                        ForEach(engine.shopRelics) { offer in
+                            VStack(spacing: 4) {
+                                CroppedSprite(name: offer.relic.iconName, contentW: 0.578, contentH: 0.266,
+                                              targetH: bodyFont * 1.5)
+                                    .opacity(offer.sold ? 0.3 : 1)
+                                Text(offer.relic.name).font(.pixel(bodyFont * 0.95)).foregroundColor(.textParchment)
+                                Text(offer.relic.description)
+                                    .font(.pixel(bodyFont * 0.78)).foregroundColor(.textMuted)
+                                    .multilineTextAlignment(.center)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(width: unit * 0.22)
+                                if offer.sold {
+                                    Text("SOLD").font(.pixel(bodyFont)).foregroundColor(.textMuted)
+                                } else {
+                                    shopBuyButton(price: offer.price, bodyFont: bodyFont) { engine.buyRelic(offer) }
+                                }
+                            }
+                            .frame(width: unit * 0.24)
+                        }
+                    }
+
+                    Text("SELL EQUIPMENT").font(.pixel(bodyFont * 1.2)).foregroundColor(.goldBright)
+                    if engine.player.equipmentInventory.isEmpty {
+                        Text("No spare equipment to sell.")
+                            .font(.pixel(bodyFont * 0.95)).foregroundColor(.textMuted)
+                    } else {
+                        VStack(spacing: 5) {
+                            ForEach(engine.player.equipmentInventory) { item in
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(item.name).font(.pixel(bodyFont)).foregroundColor(.textParchment)
+                                        Text(item.bonusSummary).font(.pixel(bodyFont * 0.85)).foregroundColor(.goldBright)
+                                    }
+                                    Spacer()
+                                    Button { engine.sellEquipment(item) } label: {
+                                        HStack(spacing: 4) {
+                                            Text("Sell").font(.pixel(bodyFont * 0.9)).foregroundColor(.textParchment)
+                                            goldCoin(size: bodyFont * 0.9)
+                                            Text("\(item.sellValue)").font(.pixel(bodyFont * 0.9)).foregroundColor(.goldBright)
+                                        }
+                                        .padding(.horizontal, 8).padding(.vertical, 3)
+                                        .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.35)))
+                                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.goldBorder.opacity(0.6), lineWidth: 1))
+                                    }.buttonStyle(.plain)
+                                }
+                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.25)))
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, unit * 0.04)
+                .padding(.bottom, unit * 0.02)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .frame(maxHeight: .infinity)   // always fill, so the shop keeps its size when empty
+
+            overlayButton("LEAVE SHOP", fontSize: btnFontSize) {
+                isEnemyTurn = false
+                engine.leaveShop()
+                if engine.gameState == .playing { dealNewHand() }
+            }
+            .padding(.bottom, unit * 0.03)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func shopBuyButton(price: Int, bodyFont: CGFloat, action: @escaping () -> Void) -> some View {
+        let affordable = engine.player.gold >= price
+        return Button(action: action) {
+            HStack(spacing: 3) {
+                goldCoin(size: bodyFont * 0.9)
+                Text("\(price)").font(.pixel(bodyFont))
+                    .foregroundColor(affordable ? .goldBright : Color(hex: 0xAA5555))
+            }
+            .padding(.horizontal, 10).padding(.vertical, 4)
+            .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.4)))
+            .overlay(RoundedRectangle(cornerRadius: 4)
+                .stroke(affordable ? Color.goldBorder : Color(hex: 0x5A3A3A), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .disabled(!affordable)
     }
 
     // MARK: - Relic Tooltip
@@ -1141,12 +1892,38 @@ struct ContentView: View {
         try? await Task.sleep(for: .seconds(0.35))
     }
 
-    /// Combat won: reveal any relic not yet shown, then the VICTORY screen.
+    /// Flash a hidden-combo notification for a beat (no tap needed — it's mid-combat).
+    @MainActor
+    private func showComboBanner(_ name: String) async {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.6)) { comboBanner = name }
+        try? await Task.sleep(for: .seconds(1.2))
+        withAnimation(.easeOut(duration: 0.3)) { comboBanner = nil }
+        try? await Task.sleep(for: .seconds(0.25))
+    }
+
+    /// Reveal each equipment piece dropped this floor, one at a time (tap to continue).
+    @MainActor
+    private func revealEarnedEquipmentIfAny() async {
+        while !engine.justEarnedEquipment.isEmpty {
+            let item = engine.justEarnedEquipment.removeFirst()
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) {
+                earnedEquipmentBanner = item
+            }
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                equipmentBannerContinuation = cont
+            }
+            withAnimation(.easeOut(duration: 0.3)) { earnedEquipmentBanner = nil }
+            try? await Task.sleep(for: .seconds(0.3))
+        }
+    }
+
+    /// Combat won: reveal any relic + equipment not yet shown, then the VICTORY screen.
     @MainActor
     private func handleCombatWon() async {
         isEnemyTurn = false
         try? await Task.sleep(for: .seconds(0.55))
-        await revealEarnedRelicIfAny()   // covers the dev-SKIP path
+        await revealEarnedRelicIfAny()       // covers the dev-SKIP path
+        await revealEarnedEquipmentIfAny()   // equipment drops
         // gameState stays .victory → the victory overlay (Next Stage / Restart) shows.
         engine.isResolvingTurn = false
     }
@@ -1201,6 +1978,12 @@ struct ContentView: View {
                     clearVFX()
                 }
 
+                // A hidden combo may have fired — announce it.
+                if let combo = engine.justTriggeredCombo {
+                    engine.justTriggeredCombo = nil
+                    await showComboBanner(combo)
+                }
+
                 // Reveal a relic (only if the floor was cleared) and run the victory flow.
                 await revealEarnedRelicIfAny()
                 if engine.gameState != .playing {
@@ -1231,22 +2014,32 @@ struct ContentView: View {
             await showBanner(.enemyTurn, hold: 0.9)
             try? await Task.sleep(for: .seconds(0.3))
 
-            // 3. Resolve the enemies' queued moves, then play their animations.
-            let enemyWillAttack = engine.anyEnemyAttacks
-            let buffingIndices = engine.buffingEnemyIndices
-            let enemyGooSpits = engine.anyEnemyGooSpits
-            engine.runEnemyTurn()
-            if enemyWillAttack { setPlayerVFX(.attack) }
-            for idx in buffingIndices { setEnemyVFX(.healDebuff, at: idx) }
-            let enemyAnim = max(enemyWillAttack ? attackAnimDuration : 0,
-                                buffingIndices.isEmpty ? 0 : healAnimDuration)
-            if enemyAnim > 0 {
-                try? await Task.sleep(for: .seconds(enemyAnim))
-                clearVFX()
-            }
-            // Goo-spit projectile flies from the boss to the player.
-            if enemyGooSpits {
-                await playGooSpit(size: size)
+            // 3. Resolve each enemy's move ONE AT A TIME, so a multi-enemy turn reads as
+            //    separate hits (each rolls Dodge/Guard on its own, with its own number).
+            for index in engine.enemies.indices {
+                guard engine.gameState == .playing else { break }
+                let enemy = engine.enemies[index]
+                guard enemy.isAlive else { continue }
+
+                let attacks = enemy.moveAttacksPlayer
+                let buffs = enemy.moveGainsBlock
+                let gooSpit = enemy.moveGooSpits
+
+                if attacks { setPlayerVFX(.attack) }
+                if buffs { setEnemyVFX(.healDebuff, at: index) }
+                engine.runEnemyMove(at: index)   // applies this one hit + sets its flash
+
+                if gooSpit {
+                    await playGooSpit(size: size)
+                }
+                let anim = max(attacks ? attackAnimDuration : 0, buffs ? healAnimDuration : 0)
+                if anim > 0 {
+                    try? await Task.sleep(for: .seconds(anim))
+                    clearVFX()
+                }
+                if engine.gameState != .playing { break }
+                // Brief beat between enemies so the hits read separately.
+                try? await Task.sleep(for: .seconds(0.22))
             }
 
             if engine.gameState != .playing { isEnemyTurn = false; engine.isResolvingTurn = false; return }
