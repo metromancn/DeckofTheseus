@@ -204,9 +204,9 @@ struct EnemyView: View {
     let statGap: CGFloat
     let pulsing: Bool
     let barWidth: CGFloat     // narrower when many enemies, to clear the player's stats
+    var onStatusTooltip: ((Bool) -> Void)? = nil
 
     // Which status badge is being hovered/held (shows its description bubble).
-    @State private var hoveredStatus: String? = nil
 
     var body: some View {
         VStack(spacing: statGap) {
@@ -251,75 +251,145 @@ struct EnemyView: View {
 
                 // Status row below the bar (no overlap with the numeric bar).
                 // Hover / hold a badge to see what it does (and what its number means).
-                if enemy.vulnerableTurns > 0 || enemy.poison > 0 || enemy.weak > 0 || enemy.stun > 0 {
-                    HStack(spacing: heartSize * 0.06) {
-                        // Placeholder status badges (no sprites yet).
-                        if enemy.vulnerableTurns > 0 { statusBadge("VULN \(enemy.vulnerableTurns)", key: "vuln", color: Color(hex: 0xC0455E)) }
-                        if enemy.poison > 0 { statusBadge("PSN \(enemy.poison)", key: "psn", color: Color(hex: 0x8A3EB0)) }
-                        if enemy.weak > 0   { statusBadge("WEAK \(enemy.weak)", key: "weak", color: Color(hex: 0xC06A2E)) }
-                        if enemy.stun > 0   { statusBadge("STUN \(enemy.stun)", key: "stun", color: Color(hex: 0x3E7AC0)) }
-                    }
-                    .overlay(alignment: .bottom) {
-                        if let key = hoveredStatus, let info = statusInfo(key) {
-                            statusTooltip(info)
-                                .offset(y: -(heartSize * 0.55))
-                                .allowsHitTesting(false)
+                StatusRowView(status: enemy.status, isPlayer: false,
+                              scale: heartSize, tooltipWidth: max(barWidth * 1.5, heartSize * 3.0),
+                              rowWidth: barWidth,
+                              // Bars narrow when 3+ enemies share the arena — one badge
+                              // per line then, so nothing overhangs its own column.
+                              maxPerRow: barWidth < heartSize * 1.7 ? 1 : 2,
+                              onTooltipChange: { onStatusTooltip?($0) })
+            }
+        }
+    }
+}
+
+// MARK: - Status Row
+//
+// The same badges and explanations for the player and for every enemy — statuses are
+// universal, so one view renders both. Wording flips person ("You take" / "Takes").
+
+struct StatusRowView: View {
+    let status: StatusEffects
+    let isPlayer: Bool
+    let scale: CGFloat          // sized off the health-bar metric of whoever owns it
+    let tooltipWidth: CGFloat
+    /// Pinned to the owner's health-bar width so a long list of statuses can never widen
+    /// the column and nudge the sprite sideways. Extra badges wrap onto further rows.
+    var rowWidth: CGFloat? = nil
+    var maxPerRow: Int = 2
+    /// Fires when the description bubble opens or closes. A tooltip drawn inside one
+    /// combatant's column is painted over by the next one, so whoever owns it has to be
+    /// raised above its siblings while it shows.
+    var onTooltipChange: ((Bool) -> Void)? = nil
+
+    @State private var hovered: String? = nil
+
+    private struct Badge: Identifiable {
+        let id: String
+        let label: String
+        let color: Color
+    }
+
+    private var badges: [Badge] {
+        var out: [Badge] = []
+        if status.vulnerable > 0 { out.append(.init(id: "vuln", label: "VULN \(status.vulnerable)", color: Color(hex: 0xC0455E))) }
+        if status.poison > 0     { out.append(.init(id: "psn",  label: "PSN \(status.poison)",      color: Color(hex: 0x8A3EB0))) }
+        if status.weak > 0       { out.append(.init(id: "weak", label: "WEAK \(status.weak)",       color: Color(hex: 0xC06A2E))) }
+        if status.frail > 0      { out.append(.init(id: "frail",label: "FRAIL \(status.frail)",     color: Color(hex: 0x4A8C8C))) }
+        if status.stun > 0       { out.append(.init(id: "stun", label: "STUN \(status.stun)",       color: Color(hex: 0x3E7AC0))) }
+        if status.thorns > 0     { out.append(.init(id: "thorn",label: "THORN \(status.thorns)",    color: Color(hex: 0x8C6A3E))) }
+        return out
+    }
+
+    /// Badges split into rows, so a fourth status stacks underneath instead of stretching
+    /// the row out sideways.
+    private var rows: [[Badge]] {
+        stride(from: 0, to: badges.count, by: maxPerRow).map {
+            Array(badges[$0 ..< min($0 + maxPerRow, badges.count)])
+        }
+    }
+
+    var body: some View {
+        if !badges.isEmpty {
+            VStack(spacing: scale * 0.05) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    HStack(spacing: scale * 0.06) {
+                        ForEach(row) { badge in
+                            Text(badge.label)
+                                .font(.pixel(scale * 0.28))
+                                .foregroundColor(.white)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                .background(Capsule().fill(badge.color))
+                                // Hover (pointer) or hold (touch) shows the description.
+                                .onHover { hovering in
+                                    if hovering { hovered = badge.id }
+                                    else if hovered == badge.id { hovered = nil }
+                                }
+                                .onLongPressGesture(minimumDuration: 0.2) {
+                                    hovered = (hovered == badge.id) ? nil : badge.id
+                                }
                         }
                     }
+                }
+            }
+            .frame(width: rowWidth)   // nil = size to content
+            .onChange(of: hovered) { _, new in onTooltipChange?(new != nil) }
+            .overlay(alignment: .bottom) {
+                if let key = hovered, let info = info(key) {
+                    tooltip(info)
+                        .offset(y: -(scale * 0.55))
+                        .allowsHitTesting(false)
                 }
             }
         }
     }
 
-    private func statusBadge(_ text: String, key: String, color: Color) -> some View {
-        Text(text)
-            .font(.pixel(heartSize * 0.28))
-            .foregroundColor(.white)
-            .padding(.horizontal, 5).padding(.vertical, 1)
-            .background(Capsule().fill(color))
-            // Hover (pointer) or hold (touch) reveals the description bubble.
-            .onHover { hovering in
-                if hovering { hoveredStatus = key }
-                else if hoveredStatus == key { hoveredStatus = nil }
-            }
-            .onLongPressGesture(minimumDuration: 0.2) {
-                hoveredStatus = (hoveredStatus == key) ? nil : key
-            }
-    }
-
-    /// Title + description for a status badge, with its number's meaning spelled out.
-    private func statusInfo(_ key: String) -> (title: String, desc: String)? {
+    /// Title + description, with the number's meaning spelled out (they differ per status:
+    /// Vulnerable stacks add up, the rest are turn counters).
+    private func info(_ key: String) -> (title: String, desc: String)? {
+        let subject = isPlayer ? "You take" : "Takes"
+        let deals   = isPlayer ? "Your attacks deal" : "Its attacks deal"
+        let gains   = isPlayer ? "You gain" : "It gains"
+        let skips   = isPlayer ? "You skip your turn" : "Skips its turn"
         switch key {
         case "vuln":
-            return ("VULNERABLE \(enemy.vulnerableTurns)",
-                    "Takes +50% damage from your attacks per stack — now +\(enemy.vulnerableTurns * 50)%. Stacks add up and last the whole fight.")
+            return ("VULNERABLE \(status.vulnerable)",
+                    "\(subject) +50% damage per stack — now +\(status.vulnerable * 50)%. Stacks add up and last the whole fight.")
         case "psn":
-            return ("POISON \(enemy.poison)",
-                    "Loses 3 HP at the start of its turn, then 1 stack falls off. The number is how many turns of poison remain.")
+            return ("POISON \(status.poison)",
+                    "3 HP lost at the start of the turn, bypassing Block, then 1 stack falls off. The number is how many turns of poison remain.")
         case "weak":
-            return ("WEAK \(enemy.weak)",
-                    "Its attacks deal 25% less damage. The number is how many of its turns this lasts (−1 each turn).")
+            return ("WEAK \(status.weak)",
+                    "\(deals) 25% less damage. The number is how many turns this lasts (−1 each turn).")
+        case "frail":
+            return ("FRAIL \(status.frail)",
+                    "\(gains) 25% less Block from every source. The number is how many turns this lasts (−1 each turn).")
         case "stun":
-            return ("STUN \(enemy.stun)",
-                    "Skips its turn entirely (poison still hurts it). The number is how many turns it stays stunned (−1 each turn).")
+            return ("STUN \(status.stun)",
+                    "\(skips) entirely (poison still bites). The number is how many turns it lasts (−1 each turn).")
+        case "thorn":
+            return ("THORNS \(status.thorns)",
+                    "Anything that attacks it takes \(status.thorns) damage, bypassing Block. Lasts the whole fight.")
         default:
             return nil
         }
     }
 
-    private func statusTooltip(_ info: (title: String, desc: String)) -> some View {
+    private func tooltip(_ info: (title: String, desc: String)) -> some View {
         VStack(spacing: 3) {
             Text(info.title)
-                .font(.pixel(heartSize * 0.26))
+                .font(.pixel(scale * 0.26))
                 .foregroundColor(.goldBright)
             Text(info.desc)
-                .font(.pixel(heartSize * 0.22))
+                .font(.pixel(scale * 0.22))
                 .foregroundColor(.textParchment)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 9).padding(.vertical, 7)
-        .frame(width: max(barWidth * 1.5, heartSize * 3.0))
+        .frame(width: tooltipWidth)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color(hex: 0x140E20)))   // fully opaque
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.goldBorder, lineWidth: 1.5))
         .shadow(color: .black.opacity(0.5), radius: 8)
@@ -413,6 +483,9 @@ struct ContentView: View {
     // Loading a run moves floor/state, which would otherwise re-fire stingers and scenes
     // for events the player already lived through.
     @State private var isRestoringRun = false
+    // The enemy whose status description is open — drawn above the others while it shows.
+    @State private var statusTooltipEnemyId: UUID? = nil
+
     // This view instance's claim on audio playback (see `AudioManager.beginSession`).
     @State private var audioSession = 0
 
@@ -553,11 +626,18 @@ struct ContentView: View {
                         }
                         .frame(height: bossSpriteH, alignment: .bottom)   // stand on the same ground as the boss
 
-                    HStack(spacing: 4) {
-                        HealthBarView(currentHp: engine.player.currentHp, maxHp: engine.player.maxHp,
-                                      width: heartSize * 1.9, height: heartSize * 0.42)
+                    VStack(alignment: .leading, spacing: heartSize * 0.06) {
+                        HStack(spacing: 4) {
+                            HealthBarView(currentHp: engine.player.currentHp, maxHp: engine.player.maxHp,
+                                          width: heartSize * 1.9, height: heartSize * 0.42)
 
-                        ShieldView(block: engine.displayPlayerBlock, size: heartSize * 0.30)
+                            ShieldView(block: engine.displayPlayerBlock, size: heartSize * 0.30)
+                        }
+
+                        // Statuses are universal — the player shows the same badges as enemies.
+                        StatusRowView(status: engine.player.status, isPlayer: true,
+                                      scale: heartSize, tooltipWidth: heartSize * 3.0,
+                                      rowWidth: heartSize * 1.9)
                     }
                 }
                 .padding(.top, spriteTopPad)
@@ -591,8 +671,12 @@ struct ContentView: View {
                             nameFont: nameFont,
                             statGap: statGap,
                             pulsing: enemyPulsing,
-                            barWidth: enemyBarW
+                            barWidth: enemyBarW,
+                            onStatusTooltip: { showing in
+                                statusTooltipEnemyId = showing ? enemy.id : nil
+                            }
                         )
+                        .zIndex(statusTooltipEnemyId == enemy.id ? 50 : 0)
                         .contentShape(Rectangle())
                         .onTapGesture {
                             guard enemy.isAlive, !engine.isResolvingTurn else { return }
@@ -605,6 +689,9 @@ struct ContentView: View {
                 .padding(.top, spriteTopPad)
                 .padding(.trailing, sideMargin)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                // Lift the whole cluster over the player's column (zIndex 5) while a
+                // status description is open, so the bubble is never painted under it.
+                .zIndex(statusTooltipEnemyId != nil ? 20 : 0)
 
                 // Bottom-LEFT: Draw pile with count right above
                 VStack(spacing: 1) {
@@ -695,7 +782,8 @@ struct ContentView: View {
                                     isAffordable: engine.canAfford(card) && !isEnemyTurn,
                                     showTooltip: tooltipCardId == card.id,
                                     cardWidth: cardW,
-                                    cardHeight: cardH
+                                    cardHeight: cardH,
+                                    ownerStatus: engine.player.status
                                 )
                             } else {
                                 FaceDownCard(width: cardW, height: cardH)
@@ -2775,6 +2863,24 @@ struct ContentView: View {
 
 // MARK: - Card View
 
+/// A card's rules text with any number a status has moved picked out in colour —
+/// red when a debuff shrank it (Frail on Block, Weak on damage), green when a buff grew it.
+func cardRulesText(_ card: Card, status: StatusEffects, base: Color = .textParchment) -> Text {
+    var out = Text("")
+    for (index, part) in card.descriptionParts(for: status).enumerated() {
+        if index > 0 { out = out + Text(" ").foregroundColor(base) }
+        out = out + Text(part.prefix).foregroundColor(base)
+        if let value = part.value {
+            let tint: Color = part.change == nil
+                ? base
+                : (part.change == .reduced ? Color(hex: 0xE2564F) : Color(hex: 0x76E06A))
+            out = out + Text(value).foregroundColor(tint).bold()
+        }
+        out = out + Text(part.suffix).foregroundColor(base)
+    }
+    return out
+}
+
 struct CardView: View {
     let card: Card
     let isSelected: Bool
@@ -2782,6 +2888,9 @@ struct CardView: View {
     let showTooltip: Bool
     let cardWidth: CGFloat
     let cardHeight: CGFloat
+    /// Statuses of whoever holds the card, so the tooltip shows the numbers you'll
+    /// actually get. Defaults to none for out-of-combat screens (shop, draft).
+    var ownerStatus: StatusEffects = StatusEffects()
 
     var body: some View {
         cardContent
@@ -2801,9 +2910,8 @@ struct CardView: View {
             )
             .overlay(alignment: .top) {
                 if showTooltip {
-                    Text(card.description)
+                    cardRulesText(card, status: ownerStatus)
                         .font(.pixel(max(cardWidth * 0.12, 14)))
-                        .foregroundColor(.textParchment)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
                         .background(

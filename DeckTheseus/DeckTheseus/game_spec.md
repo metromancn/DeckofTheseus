@@ -43,6 +43,11 @@
     resolves plays one at a time — each parks in the center, holds, fades, then its effect +
     animation fire. So you can fire several cards without waiting on animations.
   * Each card hits the enemy you aimed at **when you played it**; hold a card for its tooltip.
+  * **Tooltips show the numbers you'll actually get.** A card's rules text is built from
+    clauses with the number split out, so a value your statuses have moved is recomputed and
+    coloured — **red when a debuff shrank it** (Frail 1 turns Defend's "Gain 5 block" into a
+    red **4**), green when Strength grew it. The same `StatusEffects.damageDealt` /
+    `blockGained` helpers drive both the tooltip and combat, so the two can't drift.
 * **END TURN** runs the enemy phase (disabled while the queue is draining).
 * **Settings** (gear, top-right — hidden on the title page and during dialogue so it never
   collides with their own controls):
@@ -132,13 +137,24 @@ variety / a second biome is the intended cure for repetition _(planned)_.
   hits and Guard/Dodge roll per hit.
 * **Reshuffle** discard→draw when empty. **Exhaust** cards leave the deck until next combat.
 
-### Status effects
-* **Vulnerable** — +50% damage taken per stack; persists; cleared by the boss's Harden.
-* **Poison** — 3 damage at the start of the poisoned enemy's turn (bypasses block), −1 stack
-  per turn. Cleared by Harden. *(text badge, no sprite yet)*
-* **Weak** — the enemy's attacks deal −25% for one turn. Cleared by Harden. *(placeholder)*
-* **Stun** — the enemy skips its turn (Poison still ticks); −1 per turn. *(placeholder)*
-* **Strength** — enemy stat adding flat attack damage (gained via Harden).
+### Status effects — universal
+One `StatusEffects` model is shared by the **player and every enemy**: anything that can be
+inflicted can be inflicted on either side, and each rule reads identically for both. Timed
+statuses lose a stack at the start of their owner's own turn; buffs last the combat.
+
+| Status | Effect | Player gets it from | Enemies get it from |
+|--------|--------|---------------------|---------------------|
+| **Vulnerable** | takes +50% damage per stack (no decay) | — | Bash |
+| **Poison** | 3 damage at the start of its turn, **bypassing Block**; −1/turn | — | Poison card |
+| **Weak** | deals −25% damage; −1/turn | **Slime King** (Goo Spit) | Poison Combo |
+| **Frail** | gains −25% Block from every source; −1/turn | **Acid Slime** (Corrode) | Corrode card |
+| **Stun** | skips its turn (Poison still bites); −1/turn | — *(held back deliberately: losing a whole turn is too punishing)* | Shield Combo |
+| **Strength** | +flat damage dealt (lasts the combat) | — | Harden |
+| **Thorns** | attackers take that much, **bypassing Block** (lasts the combat) | Spikes card | **Spiked Slime** (innate 3) |
+
+**Harden** (boss) clears Vulnerable / Poison / Weak / Frail from itself; Strength and Thorns
+survive, being buffs. Statuses never carry between fights. Badges and hover/hold explanations
+render identically for both sides via one `StatusRowView`. *(All still text badges, no sprites.)*
 
 ## 7. Stats (RPG layer)
 Seven stats — **STR, DEX, CON, INT, FTH, LCK, CHA** — each raised by **stat points** or gear.
@@ -185,11 +201,17 @@ Legs, Feet, Weapon** — one item per slot; extras sit in the **inventory**.
 | Poison | Common | 1 | 5 dmg + 3 **Poison** |
 | Thunder | Uncommon | 2 | 15 dmg, +1 energy next turn |
 | Turtle | Uncommon | 2 | **Double** your current Block |
+| Corrode | Common | 0 | Apply 2 **Frail** (target gains 25% less Block) |
+| Spikes | Uncommon | 0 | Gain 3 **Thorns** — attackers take 3 |
 | Barricade | Rare | 3 | 8 Block; block no longer resets this combat |
 | Catalyst | Rare | 2 | **Double** the enemy's Poison; **Exhaust** |
 
+Bash (2⚡, 8 dmg + 1 Vulnerable) is also offered, so the pool is **10 cards**.
+
 **Status card — Slime:** unplayable; 1⚡ to remove (exhausts). Injected by the boss's Goo Spit
-and by the Slime Core relic. The **Rest-Site draft** offers only Cleave / Thunder / Barricade.
+and by the Slime Core relic. **One pool feeds both the Rest draft and the Shop**
+(`Card.obtainableCards`): everything except the Strike/Defend starters and the Slime status
+card. The draft rolls **3 at random** each visit rather than a fixed trio.
 
 ## 10. Relics
 All owned relics are active; the top-left HUD shows their icons; **duplicates stack**.
@@ -213,6 +235,9 @@ All owned relics are active; the top-left HUD shows their icons; **duplicates st
 
 ## 12. Hidden Combos
 Undocumented in-game; a center-screen **"✦ COMBO!"** banner fires when conditions are met.
+**Repeatable:** triggering a combo *spends* its tally rather than latching it off, so it fires
+as often as you can rebuild it — but the cards must be played again each time (otherwise a met
+condition would re-fire on every later card). Progress still resets between combats.
 * **Poison Combo** — Poison + Catalyst on one enemy in a single turn, *or* 2 Poison + 1 Catalyst
   on one enemy over the fight → that enemy takes **direct damage = its current Poison** and
   gains **Weak**.
@@ -306,10 +331,10 @@ Telegraphed intents; each walks a repeating rotation by turn.
 |-------|------|---:|-----:|----------|
 | Slime | Normal | 30 | 15 | Tackle 5 |
 | Red Slime | Normal | 20 | 15 | Tackle 8 → Defend 3 |
-| Acid Slime | Elite (F5) | 55 | 30 | Tackle 9 → Defend 15 · drops Vampire Tooth |
-| Spiked Slime | Elite (F13) | 72 | 30 | Tackle 8 → Spike (5 dmg + 10 block) · drops Mysterious Amber |
+| Acid Slime | Elite (F5) | 55 | 30 | **Corrode (9 dmg + 2 Frail)** → Defend 15 · drops Vampire Tooth |
+| Spiked Slime | Elite (F13) | 72 | 30 | Tackle 8 → Spike (5 dmg + 10 block) · **innate Thorns 3** · drops Mysterious Amber |
 | Giant Slime | Mini-boss (F9) | 100 | 50 | Tackle 12 → Harden (10 block + 1 Str) · **2 guaranteed gear** · placeholder art |
-| Slime King | Boss (F18) | 160 | 100 | Tackle 12 → Goo Spit ×2 → Harden (15 block + 2 Str, clears debuffs) |
+| Slime King | Boss (F18) | 160 | 100 | Tackle 12 → **Goo Spit ×2 (+2 Weak, −1 energy)** → Harden (15 block + 2 Str, clears debuffs) |
 
 ## 14. Presentation
 Turn banners; frame-by-frame VFX (`basic_attack_animation`, `heal_debuff_animation2`,
