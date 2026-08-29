@@ -56,15 +56,27 @@ struct CroppedSprite: View {
     let contentW: CGFloat   // visible content width as a fraction of the 64px canvas
     let contentH: CGFloat   // visible content height as a fraction of the 64px canvas
     let targetH: CGFloat    // desired on-screen height of the visible content
+    /// The crop box is exactly content-sized and centred on the canvas, so art that sits
+    /// even a pixel or two off-centre gets shaved. Pass `false` where the whole glyph must
+    /// show (relic icons): layout still measures the content, but nothing is cut — the
+    /// overspill is only the canvas's transparent padding.
+    var clipToContent: Bool = true
 
     var body: some View {
         let full = targetH / contentH   // scale the whole canvas so content == targetH
-        Image(name)
+        let image = Image(name)
             .resizable()
             .interpolation(.none)
             .frame(width: full, height: full)
-            .frame(width: full * contentW, height: targetH)  // clip layout to content
-            .clipped()
+
+        if clipToContent {
+            image
+                .frame(width: full * contentW, height: targetH)  // clip layout to content
+                .clipped()
+        } else {
+            image
+                .frame(width: full * contentW, height: targetH)  // same layout box, no clip
+        }
     }
 }
 
@@ -378,6 +390,36 @@ struct ContentView: View {
 
     // Which stat's explanation bubble is showing in the character screen.
     @State private var statTooltip: StatKind? = nil
+
+    // Narrative dialogue: the scene currently playing, which line it's on, and the
+    // continuation that lets a caller `await` the whole scene before continuing.
+    @State private var activeScene: DialogueScene? = nil
+    @State private var dialogueLineIndex = 0
+    @State private var dialogueContinuation: CheckedContinuation<Void, Never>? = nil
+    @State private var dialogueAutoTask: Task<Void, Never>? = nil
+    @State private var dialogueArrowPulse = false
+    // The floor whose post-fight scene already played this combat. Both win paths ask for
+    // it (card kill and the victory handler), so this keeps it to one showing per floor.
+    @State private var floorEndScenePlayed: Int? = nil
+    // True while the opening scene owns the screen: the run — cards, music — hasn't started.
+    @State private var openingActive = false
+
+    // Title page. It owns the screen at launch and whenever the player exits a run; the
+    // engine keeps the run's state untouched behind it, so "Continue" resumes exactly
+    // where they left off (floor, HP, deck, relics, stats, equipment).
+    @State private var showTitle = true
+    @State private var hasSave = false
+    @State private var hoveredMenuItem: String? = nil
+    // Loading a run moves floor/state, which would otherwise re-fire stingers and scenes
+    // for events the player already lived through.
+    @State private var isRestoringRun = false
+    // This view instance's claim on audio playback (see `AudioManager.beginSession`).
+    @State private var audioSession = 0
+
+    // Settings panel (music level, SFX on/off, save & quit).
+    @State private var showSettings = false
+    @State private var musicVolume: Float = 0.30
+    @State private var sfxOn = true
 
     // Drag-to-play: which hand card is being dragged, and its live drag offset.
     @State private var draggingCardId: UUID? = nil
@@ -756,8 +798,8 @@ struct ContentView: View {
                                 .foregroundColor(.goldBright)
                                 .shadow(color: Color.goldBright.opacity(0.8), radius: 16)
 
-                            CroppedSprite(name: relic.iconName, contentW: 0.578, contentH: 0.266,
-                                          targetH: min(unit * 0.09, 72))
+                            CroppedSprite(name: relic.iconName, contentW: relic.iconContentW, contentH: relic.iconContentH,
+                                          targetH: min(unit * 0.09, 72), clipToContent: false)
                                 .shadow(color: Color.goldBright.opacity(0.5), radius: 12)
 
                             Text(relic.name)
@@ -931,10 +973,22 @@ struct ContentView: View {
                                 }
 
                             case .actComplete:
-                                overlayTitle("ACT \(engine.currentAct) COMPLETE", size: titleFontSize * 0.6, color: .goldBright)
-                                Text("You conquered the Slime Biome!")
-                                    .font(.pixel(btnFontSize * 1.2))
-                                    .foregroundColor(.textParchment)
+                                // The story ends here — the kingdom is avenged.
+                                overlayTitle("YOUR KINGDOM IS AVENGED", size: titleFontSize * 0.5, color: .goldBright)
+                                VStack(spacing: unit * 0.012) {
+                                    Text("The Slime King is gone, and the halls are quiet again.")
+                                    Text("What's left of the kingdom is yours to rebuild.")
+                                }
+                                .font(.pixel(btnFontSize))
+                                .foregroundColor(.textParchment)
+                                .multilineTextAlignment(.center)
+                                Text("\u{2756} THE END \u{2756}")
+                                    .font(.pixel(btnFontSize * 1.1))
+                                    .foregroundColor(.goldBorder)
+                                    .padding(.top, unit * 0.01)
+                                overlayButton("Play Again", fontSize: btnFontSize) {
+                                    exitToTitle(runFinished: true)   // back to the title page
+                                }
 
                             case .victory, .defeat, .shop, .drafting, .playing:
                                 EmptyView()
@@ -944,47 +998,60 @@ struct ContentView: View {
                     }
                 }
 
-                // DEV tools (top-right) — floor picker (always) + instant-win SKIP (in combat).
-                VStack(alignment: .trailing, spacing: 8) {
-                    Button {
-                        showDevPanel = true
-                    } label: {
-                        Text("DEV \u{25BC}")
-                            .font(.pixel(titleFont * 0.85))
-                            .foregroundColor(Color(hex: 0xE0C0F0))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(RoundedRectangle(cornerRadius: 4).fill(Color(hex: 0x2A1E3A).opacity(0.85)))
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color(hex: 0x6A4A8A), lineWidth: 1.5))
+                // Settings (top-right). Hidden on the title page and during a dialogue
+                // scene, so it never collides with their own controls.
+                if !showTitle && activeScene == nil {
+                    Button { showSettings = true } label: {
+                        Image(systemName: "gearshape.fill")
+                            .font(.system(size: titleFont * 1.05))
+                            .foregroundColor(.textParchment)
+                            .padding(9)
+                            .background(Circle().fill(Color(hex: 0x1A1228).opacity(0.85)))
+                            .overlay(Circle().stroke(Color.goldBorder, lineWidth: 1.5))
                     }
                     .buttonStyle(.plain)
-
-                    if engine.gameState == .playing {
-                        Button {
-                            guard engine.gameState == .playing, !engine.isResolvingTurn, !isProcessingPlays else { return }
-                            isEnemyTurn = false
-                            engine.devWinCombat()          // kills all enemies, awards relic, marks .victory
-                            Task { @MainActor in await handleCombatWon() }
-                        } label: {
-                            Text("SKIP \u{25B6}")
-                                .font(.pixel(titleFont * 0.85))
-                                .foregroundColor(Color(hex: 0xE0C0F0))
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(RoundedRectangle(cornerRadius: 4).fill(Color(hex: 0x2A1E3A).opacity(0.85)))
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color(hex: 0x6A4A8A), lineWidth: 1.5))
-                        }
-                        .buttonStyle(.plain)
-                    }
+                    .padding(.trailing, 20)
+                    .padding(.top, 32)   // sits level with the gold / STATS block
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .zIndex(1500)
                 }
-                .padding(.trailing, 20)
-                .padding(.top, 52)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                .zIndex(1500)
+
+                if showSettings {
+                    settingsPanel(unit: unit, size: geo.size)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                        .zIndex(2600)
+                }
 
                 if showDevPanel {
                     devPanel(unit: unit)
                         .zIndex(1600)
+                }
+
+                // Narrative dialogue — above everything, including the dev buttons.
+                // Pinned to the exact geometry rect so it centers on the window even if a
+                // sibling in this ZStack overflows it.
+                if let scene = activeScene {
+                    dialogueOverlay(scene, unit: unit, size: geo.size)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                        .zIndex(2000)
+                }
+
+                // Curtain: a run has begun but its opening scene hasn't rendered yet.
+                // Without this the arena shows for a frame between the two.
+                if openingActive && activeScene == nil {
+                    Color.black
+                        .ignoresSafeArea()
+                        .zIndex(2500)
+                }
+
+                // Title page — owns the whole screen; nothing of the run shows through.
+                if showTitle {
+                    titleScreen(unit: unit, size: geo.size)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                        .zIndex(3000)
                 }
             }
         }
@@ -993,8 +1060,52 @@ struct ContentView: View {
         .onAppear {
             playerPulsing = true
             enemyPulsing = true
-            dealNewHand()
+            AudioManager.shared.preloadSFX()   // warm the voices before anything fires
+            // Claim playback before starting any, so a previous instance's teardown can't
+            // silence this one (Canvas tears views down out of order).
+            audioSession = AudioManager.shared.beginSession()
+            // The title page owns the screen at launch — the run begins on "Start Game".
+            hasSave = SaveStore.hasSave
+            musicVolume = AudioManager.shared.musicVolume
+            sfxOn = AudioManager.shared.sfxEnabled
+            if showTitle { AudioManager.shared.playMusic(.intro) }
         }
+        // The view going away (window closed, or an Xcode preview torn down) must not leave
+        // a track playing — a fade's delayed stop would never run. Only the current owner
+        // may shut playback down.
+        .onDisappear { AudioManager.shared.shutdown(token: audioSession) }
+        // A brand-new run started (Try Again) — the opening frames every run, so replay it.
+        .onChange(of: engine.runId) { _, _ in
+            openingActive = true
+            AudioManager.shared.stopMusic()
+            Task { @MainActor in await startRun() }
+        }
+        // A new floor began — clear the post-fight guard and play its pre-fight scene
+        // (also covers dev floor jumps).
+        .onChange(of: engine.currentFloor) { _, floor in
+            floorEndScenePlayed = nil
+            syncMusic()          // normal ↔ elite/boss track
+            guard !isRestoringRun else { return }
+            Task { @MainActor in await playScene(for: .beforeFloor(floor)) }
+        }
+        // Win / loss stingers, the defeat caption card, and the track for the new state.
+        .onChange(of: engine.gameState) { _, state in
+            guard !isRestoringRun else { syncMusic(); return }
+            switch state {
+            case .victory: AudioManager.shared.play(.win)
+            case .defeat:
+                AudioManager.shared.play(.lose)
+                // The run is over — drop the save so a floor checkpoint can't revive it,
+                // however the player leaves this screen.
+                SaveStore.clear()
+                hasSave = false
+                Task { @MainActor in await playScene(DialogueScript.defeatScene) }
+            default: break
+            }
+            syncMusic()
+        }
+        // Entering/leaving the stats screen swaps to (and back from) the rest track.
+        .onChange(of: showCharacter) { _, _ in syncMusic() }
     }
 
     // MARK: - DEV floor picker
@@ -1076,6 +1187,504 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
+    // MARK: - Dialogue
+
+    /// Play a scene and suspend until it finishes, so callers can sequence it inside an
+    /// existing flow (e.g. before the victory screen).
+    @MainActor
+    private func playScene(_ scene: DialogueScene) async {
+        // If a scene is somehow still up, close it out first so its awaiting caller
+        // resumes instead of hanging on an orphaned continuation.
+        if dialogueContinuation != nil { finishDialogue() }
+        dialogueAutoTask?.cancel()
+        dialogueLineIndex = 0
+        withAnimation(.easeOut(duration: 0.28)) { activeScene = scene }
+
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            dialogueContinuation = cont
+            // Auto-timed scenes walk themselves through their lines, then finish.
+            if case .autoTimed(let perLine) = scene.presentation {
+                dialogueAutoTask = Task { @MainActor in
+                    for index in scene.lines.indices {
+                        if Task.isCancelled { return }
+                        withAnimation(.easeInOut(duration: 0.3)) { dialogueLineIndex = index }
+                        try? await Task.sleep(for: .seconds(perLine))
+                    }
+                    if !Task.isCancelled { finishDialogue() }
+                }
+            }
+        }
+        try? await Task.sleep(for: .seconds(0.2))
+    }
+
+    // MARK: - Music
+    //
+    // One looping track at a time, chosen from the current game state. Called whenever
+    // anything that could change it moves; `playMusic` ignores a repeat request, so the
+    // track never restarts mid-fight.
+    private func syncMusic() {
+        // The title page or the opening owns the screen — the run's music hasn't started.
+        guard !openingActive, !showTitle else { return }
+        let track: AudioManager.Music?
+        if showCharacter {
+            track = .rest                     // stats screen — out of the fight
+        } else {
+            switch engine.gameState {
+            case .playing:
+                track = engine.isEliteOrBossEncounter ? .boss : .fight
+            case .restSite, .drafting, .shop, .actComplete, .victory:
+                track = .rest                 // resting, drafting, shopping, after a win
+            case .defeat:
+                track = nil                   // silence under the defeat stinger
+            }
+        }
+        AudioManager.shared.playMusic(track)
+    }
+
+    // MARK: - Settings
+
+    /// Speaker glyph matching the level: three waves at full, fewer as it drops, a slash
+    /// at zero (no music at all, whatever the device volume is doing).
+    private var speakerIcon: String {
+        switch musicVolume {
+        case ..<0.01: return "speaker.slash.fill"
+        case ..<0.34: return "speaker.wave.1.fill"
+        case ..<0.67: return "speaker.wave.2.fill"
+        default:      return "speaker.wave.3.fill"
+        }
+    }
+
+    @ViewBuilder
+    private func settingsPanel(unit: CGFloat, size: CGSize) -> some View {
+        let f = min(unit * 0.032, 21)
+        let barW = min(unit * 0.34, 240)
+
+        ZStack {
+            Color.black.opacity(0.72)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { showSettings = false }
+
+            VStack(alignment: .leading, spacing: unit * 0.026) {
+                HStack {
+                    Text("SETTINGS").font(.pixel(f * 1.25)).foregroundColor(.goldBright)
+                    Spacer()
+                    Button { showSettings = false } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: f, weight: .bold))
+                            .foregroundColor(.textMuted)
+                    }.buttonStyle(.plain)
+                }
+
+                // Music volume — affects the looping background track only.
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("MUSIC").font(.pixel(f * 0.95)).foregroundColor(.textMuted)
+                    HStack(spacing: 12) {
+                        Button {
+                            // Tapping the speaker mutes, or restores a sensible level.
+                            musicVolume = musicVolume > 0 ? 0 : 0.30
+                            AudioManager.shared.musicVolume = musicVolume
+                        } label: {
+                            Image(systemName: speakerIcon)
+                                .font(.system(size: f * 1.1))
+                                .foregroundColor(musicVolume > 0 ? .goldBright : Color(hex: 0xC0455E))
+                                .frame(width: f * 1.8, alignment: .leading)
+                        }.buttonStyle(.plain)
+
+                        volumeBar(width: barW, height: f * 0.62)
+
+                        Text("\(Int(musicVolume * 100))%")
+                            .font(.pixel(f * 0.85))
+                            .foregroundColor(.textParchment)
+                            .frame(width: f * 2.6, alignment: .trailing)
+                    }
+                }
+
+                // Sound effects — a plain on/off.
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("SOUND EFFECTS").font(.pixel(f * 0.95)).foregroundColor(.textMuted)
+                    Button {
+                        sfxOn.toggle()
+                        AudioManager.shared.sfxEnabled = sfxOn
+                        if sfxOn { AudioManager.shared.play(.cardFlip, debounced: false) }
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: sfxOn ? "waveform" : "speaker.slash.fill")
+                                .font(.system(size: f))
+                            Text(sfxOn ? "ON" : "OFF").font(.pixel(f))
+                        }
+                        .foregroundColor(sfxOn ? .goldBright : Color(hex: 0xC0455E))
+                        .padding(.horizontal, 18).padding(.vertical, 7)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.45)))
+                        .overlay(RoundedRectangle(cornerRadius: 6)
+                            .stroke(sfxOn ? Color.goldBorder : Color(hex: 0xC0455E).opacity(0.7), lineWidth: 1.5))
+                    }.buttonStyle(.plain)
+                }
+
+                Rectangle().fill(Color.goldBorder.opacity(0.5)).frame(height: 1)
+
+                // Developer tools — testing shortcuts, not player settings.
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("DEVELOPER").font(.pixel(f * 0.95)).foregroundColor(.textMuted)
+                    HStack(spacing: unit * 0.014) {
+                        settingsButton("Go to Stage", font: f * 0.9, tint: Color(hex: 0x2A1E3A)) {
+                            showSettings = false
+                            showDevPanel = true
+                        }
+                        settingsButton("Win Fight", font: f * 0.9, tint: Color(hex: 0x2A1E3A)) {
+                            guard engine.gameState == .playing,
+                                  !engine.isResolvingTurn, !isProcessingPlays else { return }
+                            showSettings = false
+                            isEnemyTurn = false
+                            engine.devWinCombat()
+                            Task { @MainActor in await handleCombatWon() }
+                        }
+                        .opacity(engine.gameState == .playing ? 1 : 0.45)
+                    }
+                }
+
+                Rectangle().fill(Color.goldBorder.opacity(0.5)).frame(height: 1)
+
+                VStack(spacing: unit * 0.014) {
+                    settingsButton("Save & Quit to Title", font: f, tint: Color(hex: 0x2C6E3C)) {
+                        showSettings = false
+                        exitToTitle()
+                    }
+                    settingsButton("Resume", font: f, tint: Color(hex: 0x2E2340)) {
+                        showSettings = false
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .padding(unit * 0.035)
+            .frame(width: min(unit * 0.78, 520))
+            .background(RoundedRectangle(cornerRadius: 14).fill(Color(hex: 0x18122A)))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.goldBorder, lineWidth: 2))
+            .shadow(color: .black.opacity(0.6), radius: 24)
+        }
+        .frame(width: size.width, height: size.height)
+    }
+
+    /// Pixel-styled drag bar for the music level.
+    private func volumeBar(width: CGFloat, height: CGFloat) -> some View {
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 3).fill(Color.black.opacity(0.55))
+            RoundedRectangle(cornerRadius: 3)
+                .fill(Color.goldBright)
+                .frame(width: max(0, width * CGFloat(musicVolume)))
+        }
+        .frame(width: width, height: height)
+        .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.goldBorder, lineWidth: 1.5))
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 0).onChanged { value in
+                let pct = min(max(0, value.location.x / width), 1)
+                musicVolume = Float(pct)
+                AudioManager.shared.musicVolume = musicVolume
+            }
+        )
+    }
+
+    private func settingsButton(_ title: String, font: CGFloat, tint: Color,
+                                action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.pixel(font))
+                .foregroundColor(.textParchment)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 9)
+                .background(RoundedRectangle(cornerRadius: 6).fill(tint))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.goldBorder, lineWidth: 1.5))
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Title page
+
+    /// Begin a fresh run: wipes progress and any save, then the opening plays.
+    /// `openingActive` is raised *before* the title drops so the arena never flashes
+    /// in the frame between the two.
+    private func beginNewRun() {
+        AudioManager.shared.play(.start)
+        openingActive = true
+        SaveStore.clear()
+        hasSave = false
+        engine.startGame()      // bumps runId → startRun() plays the opening
+        showTitle = false
+    }
+
+    /// Resume the saved run — from disk, so it works after quitting the app entirely.
+    private func resumeRun() {
+        AudioManager.shared.play(.start)
+        isRestoringRun = true
+        if let save = SaveStore.read() { engine.loadSave(save) }
+        showTitle = false
+        if engine.gameState == .playing { dealNewHand() }
+        syncMusic()
+        // Clear once the restore's state changes have been observed, so the next real
+        // transition announces itself normally.
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            isRestoringRun = false
+        }
+    }
+
+    /// Hand the screen back to the title page, saving the run so it can be resumed later
+    /// — including after the app is quit. A run that has *ended* (defeat, or the finished
+    /// story) is cleared instead: there's nothing left to continue.
+    private func exitToTitle(runFinished: Bool = false) {
+        if runFinished || engine.gameState == .defeat {
+            SaveStore.clear()
+            hasSave = false
+        } else {
+            engine.saveRun()
+            hasSave = true
+        }
+        showTitle = true
+        AudioManager.shared.playMusic(.intro)
+    }
+
+    /// PLACEHOLDER title page — the background is `art_title_background`, which renders as a
+    /// labelled black screen until that asset exists. Nothing of the run runs behind it.
+    @ViewBuilder
+    private func titleScreen(unit: CGFloat, size: CGSize) -> some View {
+        let titleFont = min(unit * 0.105, 78)
+        let menuFont = min(unit * 0.040, 28)
+
+        ZStack {
+            DialogueBackdropView(assetName: "art_title_background")
+                .frame(width: size.width, height: size.height)
+                .clipped()
+
+            // Darken toward the bottom so the menu stays readable over any artwork.
+            LinearGradient(colors: [.black.opacity(0.45), .black.opacity(0.82)],
+                           startPoint: .top, endPoint: .bottom)
+
+            VStack(spacing: 0) {
+                Spacer(minLength: size.height * 0.10)
+
+                VStack(spacing: unit * 0.014) {
+                    Text("DECK OF THESEUS")
+                        .font(.pixel(titleFont))
+                        .foregroundColor(.goldBright)
+                        .multilineTextAlignment(.center)
+                        .shadow(color: Color.goldBright.opacity(0.5), radius: 24)
+                        .shadow(color: .black.opacity(0.9), radius: 4)
+                    Text("\u{2756}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2756}")
+                        .font(.pixel(menuFont))
+                        .foregroundColor(.goldBorder)
+                }
+
+                Spacer(minLength: 0)
+
+                VStack(spacing: unit * 0.020) {
+                    if hasSave {
+                        titleMenuItem("Continue Run", font: menuFont) { resumeRun() }
+                    }
+                    titleMenuItem(hasSave ? "New Run" : "Start Run", font: menuFont) {
+                        beginNewRun()
+                    }
+                    #if os(macOS)
+                    titleMenuItem("Quit Game", font: menuFont) {
+                        NSApplication.shared.terminate(nil)
+                    }
+                    #endif
+                }
+                .padding(.bottom, size.height * 0.11)
+            }
+
+            Text("Act 1 \u{2022} Slime Biome \u{2014} placeholder title art")
+                .font(.pixel(min(unit * 0.024, 15)))
+                .foregroundColor(.textMuted)
+                .padding(20)
+                .frame(width: size.width, height: size.height, alignment: .bottomLeading)
+        }
+        .frame(width: size.width, height: size.height)
+    }
+
+    private func titleMenuItem(_ label: String, font: CGFloat, action: @escaping () -> Void) -> some View {
+        let hot = hoveredMenuItem == label
+        return Button(action: action) {
+            HStack(spacing: 12) {
+                Text("\u{273A}").opacity(hot ? 1 : 0)
+                Text(label)
+                Text("\u{273A}").opacity(hot ? 1 : 0)
+            }
+            .font(.pixel(font))
+            .foregroundColor(hot ? .goldBright : .textParchment)
+            .shadow(color: hot ? Color.goldBright.opacity(0.7) : .clear, radius: 12)
+            .padding(.horizontal, 10).padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hoveredMenuItem = $0 ? label : (hoveredMenuItem == label ? nil : hoveredMenuItem) }
+    }
+
+    /// Start a run. The opening plays on its own screen — no cards are dealt and no combat
+    /// music starts until it's finished, so nothing of the fight leaks through it.
+    @MainActor
+    private func startRun() async {
+        await playScene(for: .runStart)
+        openingActive = false
+        dealNewHand()
+        syncMusic()
+    }
+
+    /// Play the scene for a trigger, if the script has one. Every scene is mandatory —
+    /// it plays each time its trigger fires, on every run.
+    @MainActor
+    private func playScene(for trigger: DialogueTrigger) async {
+        guard let scene = DialogueScript.scene(for: trigger) else { return }
+        await playScene(scene)
+    }
+
+    /// The current floor's post-fight scene, shown once per combat however many win paths
+    /// ask for it. Reset when the next floor begins, so it plays again on a later run.
+    @MainActor
+    private func playFloorEndScene() async {
+        guard floorEndScenePlayed != engine.currentFloor else { return }
+        floorEndScenePlayed = engine.currentFloor
+        await playScene(for: .afterFloor(engine.currentFloor))
+    }
+
+    /// Tap anywhere: next line for a tap-through scene, skip entirely for an auto card.
+    private func advanceDialogue() {
+        guard let scene = activeScene else { return }
+        guard case .tapToAdvance = scene.presentation else { finishDialogue(); return }
+        if dialogueLineIndex + 1 < scene.lines.count {
+            withAnimation(.easeInOut(duration: 0.18)) { dialogueLineIndex += 1 }
+        } else {
+            finishDialogue()
+        }
+    }
+
+    /// End the scene and resume whoever is awaiting it. Safe to call twice.
+    private func finishDialogue() {
+        dialogueAutoTask?.cancel()
+        dialogueAutoTask = nil
+        withAnimation(.easeIn(duration: 0.22)) { activeScene = nil }
+        let cont = dialogueContinuation
+        dialogueContinuation = nil
+        cont?.resume()
+    }
+
+    /// CRK-style scene: portrait to one side, name pill above a dialogue box along the
+    /// bottom. Captions drop the portrait and pill and center their text.
+    @ViewBuilder
+    private func dialogueOverlay(_ scene: DialogueScene, unit: CGFloat, size: CGSize) -> some View {
+        let line = scene.lines[min(dialogueLineIndex, scene.lines.count - 1)]
+        let speaker = line.speaker
+        let textFont = min(unit * 0.038, 25)
+        let portraitH = min(unit * 0.34, 280)
+        let isTapScene: Bool = { if case .tapToAdvance = scene.presentation { return true }; return false }()
+        // Definite width so the box (and the portrait above it) centre reliably.
+        let boxW = min(size.width * 0.88, 980)
+
+        ZStack {
+            // Either dim the arena behind the scene, or replace it with story art. Lines
+            // can cut to a different image mid-scene, so this resolves per line and
+            // crossfades between them.
+            let backdrop = scene.resolvedBackdrop(at: dialogueLineIndex)
+            Group {
+                switch backdrop {
+                case .arena:          Color.black.opacity(0.55)
+                case .art(let name):  DialogueBackdropView(assetName: name)
+                }
+            }
+            .id(backdrop)
+            .transition(.opacity)
+            .animation(.easeInOut(duration: 0.35), value: backdrop)
+            .frame(width: size.width, height: size.height)
+            .clipped()
+            .contentShape(Rectangle())
+            .onTapGesture { advanceDialogue() }
+
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
+
+                // Portrait — knight on the left, everyone else on the right.
+                if let speaker {
+                    HStack(spacing: 0) {
+                        if !speaker.isPlayerSide { Spacer(minLength: 0) }
+                        CroppedSprite(name: speaker.portrait.name,
+                                      contentW: speaker.portrait.contentW,
+                                      contentH: speaker.portrait.contentH,
+                                      targetH: portraitH)
+                            .shadow(color: .black.opacity(0.7), radius: 18)
+                            .transition(.opacity)
+                        if speaker.isPlayerSide { Spacer(minLength: 0) }
+                    }
+                    .frame(width: boxW)
+                    .padding(.bottom, unit * 0.012)
+                }
+
+                // Name pill + dialogue box.
+                VStack(alignment: speaker?.isPlayerSide == false ? .trailing : .leading, spacing: -unit * 0.014) {
+                    if let speaker {
+                        Text(speaker.displayName)
+                            .font(.pixel(textFont * 0.9))
+                            .foregroundColor(Color(hex: 0x140E20))
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 5)
+                            .background(Capsule().fill(Color.goldBright))
+                            .overlay(Capsule().stroke(Color.goldBorder, lineWidth: 2))
+                            .padding(.horizontal, unit * 0.03)
+                            .zIndex(2)
+                    }
+
+                    Text(line.text)
+                        .font(.pixel(textFont))
+                        .foregroundColor(.textParchment)
+                        .multilineTextAlignment(speaker == nil ? .center : .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: speaker == nil ? .center : .leading)
+                        .padding(.horizontal, unit * 0.04)
+                        .padding(.vertical, unit * 0.032)
+                        .frame(width: boxW, alignment: .center)
+                        .frame(minHeight: unit * 0.16, alignment: .center)
+                        .background(RoundedRectangle(cornerRadius: 16).fill(Color(hex: 0x140E20).opacity(0.92)))
+                        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.goldBorder, lineWidth: 2))
+                        // Advance arrow (tap-through scenes only).
+                        .overlay(alignment: .bottomTrailing) {
+                            if isTapScene {
+                                Text("\u{25BC}")
+                                    .font(.system(size: textFont * 0.7))
+                                    .foregroundColor(.goldBright)
+                                    .opacity(dialogueArrowPulse ? 0.3 : 1.0)
+                                    .onAppear {
+                                        dialogueArrowPulse = false
+                                        withAnimation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true)) {
+                                            dialogueArrowPulse = true
+                                        }
+                                    }
+                                    .padding(.trailing, 14).padding(.bottom, 10)
+                            }
+                        }
+                }
+                .frame(width: boxW)
+                .padding(.bottom, unit * 0.05)
+            }
+            .frame(width: size.width, height: size.height)
+            .contentShape(Rectangle())
+            .onTapGesture { advanceDialogue() }
+
+            // SKIP — always available, for returning players.
+            Button { finishDialogue() } label: {
+                Text("SKIP")
+                    .font(.pixel(min(unit * 0.03, 20)))
+                    .foregroundColor(.textParchment)
+                    .padding(.horizontal, 16).padding(.vertical, 6)
+                    .background(Capsule().fill(Color.black.opacity(0.6)))
+                    .overlay(Capsule().stroke(Color.goldBorder, lineWidth: 1.5))
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 20).padding(.top, 16)
+            .frame(width: size.width, height: size.height, alignment: .topTrailing)
+        }
+        .frame(width: size.width, height: size.height)
+        .transition(.opacity)
+    }
+
     // MARK: - Overlay Helpers
 
     private func overlayTitle(_ text: String, size: CGFloat, color: Color) -> some View {
@@ -1144,7 +1753,8 @@ struct ContentView: View {
     /// A relic icon in the top HUD (same height as the gold coin). Hover or hold to
     /// reveal its name + description just below the icon.
     private func relicHudIcon(_ relic: Relic, size: CGFloat) -> some View {
-        CroppedSprite(name: relic.iconName, contentW: 0.578, contentH: 0.266, targetH: size)
+        CroppedSprite(name: relic.iconName, contentW: relic.iconContentW, contentH: relic.iconContentH,
+                      targetH: size, clipToContent: false)
             .contentShape(Rectangle())
             .overlay(alignment: .topLeading) {
                 if relicTooltipId == relic.id {
@@ -1235,6 +1845,7 @@ struct ContentView: View {
                     engine.commitAllocations(pendingAlloc)
                     pendingAlloc = [:]
                     if isPostVictory {
+                        AudioManager.shared.play(.start)   // "Next Stage"
                         showCharacter = false
                         isEnemyTurn = false
                         engine.advanceFloor()              // onto the next stage
@@ -1532,7 +2143,7 @@ struct ContentView: View {
     private func victoryOverlay(unit: CGFloat, btnFontSize: CGFloat) -> some View {
         resultOverlay(unit: unit, title: "VICTORY", titleColor: .goldBright, showRewards: true) {
             victoryButton("Exit", fontSize: btnFontSize, tint: Color(hex: 0x4A90C2)) {
-                // No-op for now — returns to the Map once the mapping system exists.
+                exitToTitle()   // run is kept intact; "Continue" picks it back up
             }
             // "Next" opens the full stats page; confirming there advances to the next stage.
             victoryButton("Next", fontSize: btnFontSize, tint: Color(hex: 0x5BA84F)) {
@@ -1549,24 +2160,24 @@ struct ContentView: View {
             victoryButton("Try Again", fontSize: btnFontSize, tint: Color(hex: 0xD86A8C)) {
                 isEnemyTurn = false
                 engine.startGame()      // restart the whole run from Act 1, Floor 1
-                dealNewHand()
+                // The hand is dealt by `startRun()` once the opening scene finishes.
             }
             victoryButton("Exit", fontSize: btnFontSize, tint: Color(hex: 0x4A90C2)) {
-                // No-op for now — returns to the Map once the mapping system exists.
+                exitToTitle()   // run is kept intact; "Continue" picks it back up
             }
         }
     }
 
-    /// The bar below the hero. On victory it holds the reward chips (first-win bonus in
-    /// front of the normal gold); on defeat it's an empty bar of the same size.
+    /// The bar below the hero. On victory it holds the reward chips (the Clean Fight
+    /// bonus in front of the normal gold); on defeat it's an empty bar of the same size.
     private func rewardsBar(unit: CGFloat, showRewards: Bool) -> some View {
         let chip = min(unit * 0.10, 76)
         return HStack(spacing: unit * 0.018) {
             if showRewards {
-                if engine.lastFirstWinBonus > 0 {
-                    rewardChip(amount: engine.lastFirstWinBonus, size: chip, firstWin: true)
+                if engine.lastBonusGold > 0 {
+                    rewardChip(amount: engine.lastBonusGold, size: chip, bonusLabel: "Clean Fight")
                 }
-                rewardChip(amount: engine.lastGoldEarned, size: chip, firstWin: false)
+                rewardChip(amount: engine.lastGoldEarned, size: chip, bonusLabel: nil)
             } else {
                 // Reserve the chip height so the empty bar matches the victory bar's size.
                 Color.clear.frame(width: 1, height: chip * 1.8)
@@ -1583,13 +2194,13 @@ struct ContentView: View {
         .padding(.horizontal, unit * 0.04)
     }
 
-    private func rewardChip(amount: Int, size: CGFloat, firstWin: Bool) -> some View {
+    private func rewardChip(amount: Int, size: CGFloat, bonusLabel: String?) -> some View {
         VStack(spacing: 5) {
-            // "First Win" bubble — fixed-height row so chips with/without it align.
+            // Bonus bubble — fixed-height row so chips with/without it align.
             // (Uses an empty ZStack, not Color.clear, so it never stretches width.)
             ZStack {
-                if firstWin {
-                    Text("First Win")
+                if let bonusLabel {
+                    Text(bonusLabel)
                         .font(.pixel(size * 0.26))
                         .foregroundColor(Color(hex: 0x3A2A10))
                         .padding(.horizontal, 8)
@@ -1681,8 +2292,8 @@ struct ContentView: View {
                     HStack(alignment: .top, spacing: unit * 0.02) {
                         ForEach(engine.shopRelics) { offer in
                             VStack(spacing: 4) {
-                                CroppedSprite(name: offer.relic.iconName, contentW: 0.578, contentH: 0.266,
-                                              targetH: bodyFont * 1.5)
+                                CroppedSprite(name: offer.relic.iconName, contentW: offer.relic.iconContentW, contentH: offer.relic.iconContentH,
+                                              targetH: bodyFont * 1.5, clipToContent: false)
                                     .opacity(offer.sold ? 0.3 : 1)
                                 Text(offer.relic.name).font(.pixel(bodyFont * 0.95)).foregroundColor(.textParchment)
                                 Text(offer.relic.description)
@@ -1922,6 +2533,9 @@ struct ContentView: View {
     private func handleCombatWon() async {
         isEnemyTurn = false
         try? await Task.sleep(for: .seconds(0.55))
+        // Post-fight scene before any reward UI. Already-played scenes no-op, so the
+        // enemy-turn kill path and this one can both ask safely.
+        await playFloorEndScene()
         await revealEarnedRelicIfAny()       // covers the dev-SKIP path
         await revealEarnedEquipmentIfAny()   // equipment drops
         // gameState stays .victory → the victory overlay (Next Stage / Restart) shows.
@@ -1984,6 +2598,16 @@ struct ContentView: View {
                     await showComboBanner(combo)
                 }
 
+                // The floor's post-fight scene lands first — a dying taunt reads wrong
+                // after a rewards screen. Claim the turn first: resolving a card sets
+                // .victory immediately, and without this the VICTORY screen would draw
+                // underneath the scene and the reward banners instead of waiting for them.
+                // (`handleCombatWon` clears it once every reveal has been dismissed.)
+                if engine.gameState == .victory {
+                    engine.isResolvingTurn = true
+                    await playFloorEndScene()
+                }
+
                 // Reveal a relic (only if the floor was cleared) and run the victory flow.
                 await revealEarnedRelicIfAny()
                 if engine.gameState != .playing {
@@ -2042,7 +2666,18 @@ struct ContentView: View {
                 try? await Task.sleep(for: .seconds(0.22))
             }
 
-            if engine.gameState != .playing { isEnemyTurn = false; engine.isResolvingTurn = false; return }
+            // Combat can also END during the enemy turn — most often a Poison tick killing
+            // the last enemy at the start of its turn. Route that through the same victory
+            // flow as a card kill, or the post-fight scene and reward reveals are skipped.
+            if engine.gameState != .playing {
+                isEnemyTurn = false
+                if engine.gameState == .victory {
+                    await handleCombatWon()      // scene → relic → equipment → VICTORY
+                } else {
+                    engine.isResolvingTurn = false
+                }
+                return
+            }
 
             // 4. Let the enemy's result sink in.
             try? await Task.sleep(for: .seconds(comprehendPause))
@@ -2127,6 +2762,9 @@ struct ContentView: View {
                     dealtCardIds.insert(card.id)
                 }
                 try? await Task.sleep(for: .seconds(0.28))
+                // Fire the flip a hair before the animation: audio goes through an output
+                // buffer, the frame doesn't. One per card, never debounced away.
+                AudioManager.shared.play(.cardFlip, debounced: false)
                 withAnimation(.easeInOut(duration: 0.08)) {
                     revealedCardIds.insert(card.id)
                 }

@@ -8,10 +8,13 @@
 * **Genre:** solo Roguelike Deckbuilder + light RPG (stats, equipment).
 * **Platform:** native **SwiftUI** (iOS + macOS). `@Observable` drives all state
   (`GameEngine`, `Player`, `Enemy`, `DeckManager`).
-* **Visual Style:** hand-authored **pixel-art PNGs** trimmed at render time by `CroppedSprite`.
+* **Visual Style:** hand-authored **pixel-art PNGs** trimmed at render time by `CroppedSprite`
+  (its crop box is exactly content-sized, so art sitting off-centre in its canvas gets shaved —
+  relic icons pass `clipToContent: false` to show the whole glyph).
   Font: **VT323**, registered at runtime.
 * **Key files:** `GameEngine.swift` (state + logic), `ContentView.swift` (all UI),
-  `DeckTheseusApp.swift` (entry + font).
+  `Dialogue.swift` (story scenes), `AudioManager.swift` (music + SFX),
+  `SaveGame.swift` (run persistence), `DeckTheseusApp.swift` (entry + font).
 
 ## 2. Core State
 * **Player:** `currentHp`; `maxHp` is **computed** = `baseMaxHp (80)` + effective CON. Energy
@@ -19,7 +22,9 @@
   (starts 0). Stat allocations, equipped gear, and equipment inventory all live here.
 * **Deck:** `masterDeck`, `drawPile`, `discardPile`, `exhaustPile`, `hand`.
 * **Relics:** `playerRelics` — **all owned relics are always active**; duplicates stack.
-* **Progression:** `currentAct`, `currentFloor`, `clearedFloors` (first-win tracking).
+* **Progression:** `currentAct`, `currentFloor`, `clearedFloors`. `damageTakenThisCombat`
+  tracks the Clean Fight bonus. `runId` bumps on every `startGame()`, which is what tells the
+  view a new run began (and to replay the opening).
 
 ## 3. Combat Screen & Interaction
 * **Top-left HUD:** Act-Floor, Turn, **gold** (coin + amount), owned **relic icons** (hover/hold
@@ -39,15 +44,51 @@
     animation fire. So you can fire several cards without waiting on animations.
   * Each card hits the enemy you aimed at **when you played it**; hold a card for its tooltip.
 * **END TURN** runs the enemy phase (disabled while the queue is draining).
-* **Dev SKIP** (top-right) instant-wins the fight.
+* **Settings** (gear, top-right — hidden on the title page and during dialogue so it never
+  collides with their own controls):
+  * **Music** — a drag bar with a speaker glyph stepping three waves → two → one → slash as it
+    falls; tapping the speaker mutes/restores. 0 is silent regardless of device volume, and the
+    track keeps running silently so raising the bar resumes it instantly. Looping music only,
+    never SFX.
+  * **Sound Effects** — a plain on/off.
+  * **Developer** — Go to Stage (floor picker) and Win Fight.
+  * **Save & Quit to Title**, and Resume.
+  * Both audio settings apply live and persist between launches.
+
+## 3b. Title Page
+The game opens on a **title page**, not a fight — it owns the whole screen, and nothing of a
+run (cards, music) runs behind it. Menu: **Start Run / New Run**, **Continue Run** (only when a
+resumable run is saved), and **Quit Game** (macOS, quits the app). Background art is `art_title_background`, a
+labelled black placeholder until that asset is added.
+
+### Saving
+* **Exit** (victory/defeat screens) and **Save & Quit** (settings) return here and **save the
+  run** — floor, HP, gold, deck, relics, stats and equipment — so *Continue Run* resumes it
+  **even after quitting the app**. The run is also checkpointed at every floor.
+* **A defeat ends the run.** The save is cleared the moment the player dies, so no *Continue
+  Run* is offered for a lost run however they leave the screen.
+* Saves are JSON in `UserDefaults` (~0.7KB). Cards and relics are stored **by name** and rebuilt
+  from their factories, so balance changes apply to saved runs instead of resurrecting stale
+  numbers; equipment is stored in full, since its stat rolls are generated per drop.
+* Combat is never resumed mid-fight: a run saved anywhere other than a result screen re-enters
+  that floor from its start.
+* *New Run* clears the save and replays the opening; *Continue Run* does not replay it.
+
+The title plays `sfx_introloop`; **Start Run / New Run / Continue Run** fire `sfx_start`.
 
 ## 4. Result / Progression Screens
-* **Victory:** Act-Floor + "VICTORY", hero centered, rewards bar (gold, first-win bonus, `+N
-  Stat Points`). Buttons: **Exit** (no-op, reserved for the Map) and **Next** → opens the
+* **Victory:** Act-Floor + "VICTORY", hero centered, rewards bar (gold, **Clean Fight** bonus,
+  `+N Stat Points`). Buttons: **Exit** (back to the title page, run kept) and **Next** → opens the
   full **stats page**, whose confirm button reads **"Next Stage ▶"** (commits your point
   allocation and advances). So every advance routes through the allocation screen.
 * **Defeat:** red "DEFEAT", empty rewards bar. **Try Again** = **full run restart** from Act 1
-  Floor 1 (HP/gold/relics/gear/deck all wiped — Slay-the-Spire style); **Exit** no-op.
+  Floor 1 (HP/gold/relics/gear/deck all wiped — Slay-the-Spire style); **Exit** → title page,
+  with the save cleared (a lost run can't be continued).
+* **Clean Fight bonus (+15 gold):** awarded on any floor cleared having lost **at most a
+  quarter of max HP** (20 at the base 80, and it scales with CON). Replaces the old one-time
+  first-clear bonus, which made no sense on a linear run you never revisit.
+* **Ending:** clearing Floor 18 ends the story — "YOUR KINGDOM IS AVENGED" + THE END, with
+  **Play Again** returning to the title page.
 * **Rest Site / Card Draft / Shop / Act Complete / relic + equipment reveal banners / combo
   banner** — see below.
 
@@ -74,7 +115,7 @@ Encounters are **fixed per floor** (`setupCurrentFloor()`), hand-tuned into a fa
 | 16 | **Rest** | heal only (no draft) |
 | 17 | Combat | 3 Red Slimes (final gauntlet) |
 | 18 | **Boss** | Slime King |
-| 19 | Run complete | "Act 1 Complete" |
+| 19 | Story ends | "YOUR KINGDOM IS AVENGED" |
 
 Progression is **linear**; a branching **Map** and **Acts 2–3** are _(planned)_. More enemy
 variety / a second biome is the intended cure for repetition _(planned)_.
@@ -156,15 +197,16 @@ All owned relics are active; the top-left HUD shows their icons; **duplicates st
   2 HP (+Lifesteal stats). Two copies = two rolls.
 * **Mysterious Amber** (Spiked Slime, F13) — +6 Block at combat start and +5 Block every 3rd
   turn, **per copy** (2 copies = 12 / 10).
-* **Slime Core** (Shop, placeholder icon) — +1 Max Energy, but start each combat with a Slime
+* **Slime Core** (Shop) — +1 Max Energy, but start each combat with a Slime
   card mixed into your deck (per copy).
 
 **Drops:** elites drop their relic at 100% on floor clear.
 
 ## 11. Shop (after the Floor-10 rest)
-* **Cards (5):** 2 Common / 2 Uncommon / 1 Rare from the pool, priced 50 / 60 / 75. Buying adds
-  the card to your deck and marks it SOLD; hold a card to read it.
+* **Cards (5):** 2 Common / 2 Uncommon / 1 Rare from the pool, priced 50 / 60 / 75, **+1 extra
+  offer per 20 CHA**. Buying adds the card to your deck and marks it SOLD; hold a card to read it.
 * **Relics (2–3):** random from the pool (duplicates buyable), 150–300 gold, with descriptions.
+* **CHA discounts every price** (up to 50% off), applied when the stock is rolled.
 * **Sell Equipment:** sell spare inventory gear for its sell value.
 * **LEAVE SHOP** starts Floor 11.
 * _(Cut for now: crafting, merge-equipment, card removal.)_
@@ -177,6 +219,85 @@ Undocumented in-game; a center-screen **"✦ COMBO!"** banner fires when conditi
 * **Shield Combo** — play Fortify + Turtle + Barricade + Defend during one fight → the
   **lowest-HP** enemy takes **direct damage = your current Block**, is **Stunned**, and you
   **gain 8 Block**.
+
+## 12b. Narrative Dialogue
+Cookie-Run-Kingdom-style scenes: a portrait to one side, a gold **name pill** above a
+translucent box along the bottom, one line at a time, **tap anywhere** to advance (▼ blinks),
+**SKIP** top-right. Captions (no speaker) drop the portrait/pill and center their text.
+Fully **data-driven** in `Dialogue.swift` — a `DialogueScene` is an array of `DialogueLine`s
+looked up by `DialogueTrigger` in `DialogueScript.scenes`; adding beats never touches the renderer.
+
+| Scene | Trigger | Lines |
+|-------|---------|------:|
+| Opening | run start (before Floor 1) | 4 |
+| Acid Slime pre / post | before / after Floor 5 | 2 / 1 |
+| Spiked Slime pre / post | before / after Floor 13 | 3 / 1 |
+| Slime King pre / epilogue | before / after Floor 18 | 4 / 5 |
+| Defeat | on death | 3 |
+
+* **Post-fight scenes land before the reward banners + VICTORY screen** — a dying taunt after
+  a rewards screen reads wrong.
+* **Every scene is mandatory.** There is no seen-once tracking anywhere — each scene plays
+  every time its trigger fires, on every run, with **SKIP** always available for repeat
+  viewings. The opening fires on every `runId` bump — i.e. **Start/New Run** from the title and
+  **Try Again** after a defeat — but *not* at app launch (the title comes first) and not on
+  *Continue Run*. A black curtain covers the frame between a run starting and its opening
+  scene rendering, so the arena never flashes.
+* **Defeat** differs only in presentation — every line is a caption, so it's an **auto-timed
+  card** (no taps needed; any tap skips) rather than a tap-through scene. All 3 lines play on
+  every death. Basic/Red Slime have no dialogue.
+* **Backdrops:** `.arena` (battlefield visible + dimmed — the pre/post-fight banter) or
+  `.art("name")` (full-screen story art replacing the arena). A **line** can also set one,
+  and the change **sticks** until another line changes it, so a scene can cut between images
+  mid-dialogue (crossfaded). The **opening** cuts from `art_castle` (the kingdom standing) to
+  `art_destroyedcastle` on its second line, which then holds for the knight's lines.
+  A named asset that isn't in the catalog yet renders as a labelled black placeholder, so
+  dropping artwork in later needs **no code change**.
+  The epilogue is still `.arena`; switching it is a one-line change once its art is drawn.
+* **Portraits are placeholders** — they reuse the existing combat sprites (knight =
+  `player_sprite`); swap for real portrait art without touching anything else.
+
+## 12c. Audio
+All sound runs through `AudioManager.swift` (AVFoundation). Files live in `DeckTheseus/Sounds/`
+and are bundled automatically; lookup tries .wav/.mp3/.flac at the bundle root or in `Sounds/`,
+so formats can be mixed freely. SFX play at 85%; music defaults to 30% and is set by the
+player in Settings (persisted in `UserDefaults`, applied live).
+
+**Music** — exactly one looping track at a time, crossfaded (0.45s) and never restarted if
+already playing. `syncMusic()` derives it from state:
+
+| Track | When |
+|-------|------|
+| `sfx_fightloop` | in a normal combat |
+| `sfx_bossloop` | elite, mini-boss or boss combat (from `isEliteOrBossEncounter`, derived from the enemies, not hard-coded floors) |
+| `sfx_restloop` | rest site, card draft, shop, stats/character screen, victory, act complete |
+| `sfx_introloop` | the title page |
+| *(silence)* | defeat — under the lose stinger |
+
+**One-shot SFX**
+
+| Sound | Trigger |
+|-------|---------|
+| `sfx_attack` | any player damage to an enemy — attack cards, both combos, poison ticks (hooked in `dealDamage`) |
+| `sfx_block` | an incoming hit is Guarded or absorbed by Block |
+| `sfx_damage` | an incoming hit reaches HP (not when fully blocked) |
+| `sfx_heal` | player **or** enemy gains Block, and any heal (Vampire Tooth, rest, FTH combat-end) |
+| `sfx_cardflip` | each card as it flips face-up while a hand is dealt — one per card, on its own stagger |
+| `sfx_win` / `sfx_lose` | combat resolves to victory / defeat |
+| `sfx_start` | "Next Stage ▶", and Start / New / Continue Run on the title |
+
+Repeats of the same sound inside 70ms are suppressed, so an AOE hitting three enemies reads as
+one impact instead of three stacked copies. `play(_:debounced:)` opts out of that — the card
+flip uses it so every dealt card is heard, however tight the stagger.
+
+The two long loops are **AAC/m4a** (160 kbps, converted from 31/30MB WAVs — 3.5MB combined,
+identical durations), keeping the whole bundle ~15MB.
+
+Playback is **session-tokened**: each appearing view claims playback via `beginSession()`, and
+`shutdown(token:)` is ignored unless it is the current owner — Xcode's Canvas tears an old view
+down *after* its replacement appears, and without this the stale teardown silenced the live one.
+For the same reason `playMusic` only treats a repeat request as a no-op while the track is
+*genuinely still playing*, so a stale `currentMusic` can't leave the game permanently silent.
 
 ## 13. Enemies (Act 1)
 Telegraphed intents; each walks a repeating rotation by turn.
@@ -192,11 +313,15 @@ Telegraphed intents; each walks a repeating rotation by turn.
 
 ## 14. Presentation
 Turn banners; frame-by-frame VFX (`basic_attack_animation`, `heal_debuff_animation2`,
-`goo_spit_animation`); card deal/flip/play; relic + equipment reveal banners; combo banner.
+`goo_spit_animation`); card deal/flip/play; relic + equipment reveal banners; combo banner;
+title page; settings panel.
 
 ## 15. Not Yet Implemented (Roadmap)
 * Branching **Map**; **Acts 2 & 3** and a **second biome / new enemy types**.
-* Real **art** for: Giant Slime, Slime Core relic, Poison/Weak/Stun status icons.
+* Real **art** for: the **title background** (`art_title_background`), the **epilogue**
+  backdrop, Giant Slime, Poison/Weak/Stun status icons, and dialogue **portraits** (which
+  currently reuse combat sprites). Each is a named placeholder that swaps in with no code change.
+* **Saving mid-combat** — a run is only checkpointed at floor boundaries and result screens.
 * **Classes** (base stats + starting decks), **subclasses via encounters**, an **encounter**
   framework (AAC-style 3-choice nodes).
 * **Ascension** difficulty ladder; **global leaderboard**; card **upgrades**.

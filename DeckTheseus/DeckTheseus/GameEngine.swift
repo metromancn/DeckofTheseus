@@ -12,7 +12,7 @@ enum CardType: String {
 
 // MARK: - Game State
 
-enum GameState {
+enum GameState: String {
     case playing
     case victory
     case defeat
@@ -52,25 +52,42 @@ struct Relic: Identifiable {
     let name: String
     let description: String
     let iconName: String
+    /// Where the art actually sits inside its 64px canvas, so every relic icon renders at
+    /// the same on-screen size (see `CroppedSprite`). Measured per asset.
+    let iconContentW: CGFloat
+    let iconContentH: CGFloat
 
     static var vampireTooth: Relic {
         Relic(name: "Vampire Tooth",
               description: "50% chance to heal 2 HP when you play an Attack card.",
-              iconName: "relic_vampire_tooth")
+              iconName: "relic_vampire_tooth",
+              iconContentW: 0.578, iconContentH: 0.266)
     }
 
     /// Floor 11 elite reward — a defensive block relic.
     static var mysteriousAmber: Relic {
         Relic(name: "Mysterious Amber",
               description: "Gain 6 Block at the start of combat. At the start of every 3rd turn, gain 5 Block.",
-              iconName: "relic_mysterious_amber")
+              iconName: "relic_mysterious_amber",
+              iconContentW: 0.297, iconContentH: 0.312)
     }
 
-    /// Shop relic (placeholder art) — energy for a small deck-dilution cost.
+    /// Shop relic — energy for a small deck-dilution cost.
     static var slimeCore: Relic {
         Relic(name: "Slime Core",
               description: "+1 Max Energy. Start each combat with a Slime card mixed into your deck.",
-              iconName: "relic_vampire_tooth")   // placeholder art until its own is added
+              iconName: "relic_slime_core",
+              iconContentW: 0.297, iconContentH: 0.297)
+    }
+
+    /// Rebuild a relic from its name — saved runs store names, not whole relics.
+    static func named(_ name: String) -> Relic? {
+        switch name {
+        case "Vampire Tooth":   return vampireTooth
+        case "Mysterious Amber": return mysteriousAmber
+        case "Slime Core":      return slimeCore
+        default:                return nil
+        }
     }
 
     /// Every relic the Shop can stock.
@@ -174,6 +191,28 @@ struct Card: Identifiable {
     static func catalyst() -> Card {
         Card(name: "Catalyst", type: .skill, energyCost: 2, damage: 0, block: 0,
              imageName: "card_catalyst_skill", isExhaustible: true, doublesPoison: true, rarity: .rare)
+    }
+
+    /// Rebuild a card from its name — a saved deck stores names, not whole cards, so
+    /// tuning a card's numbers automatically applies to loaded runs too.
+    static func named(_ name: String) -> Card? {
+        switch name {
+        case "Strike":    return Card(name: "Strike", type: .attack, energyCost: 1, damage: 6, block: 0,
+                                      imageName: "card_strike_attack")
+        case "Defend":    return Card(name: "Defend", type: .skill, energyCost: 1, damage: 0, block: 5,
+                                      imageName: "card_defend_skill")
+        case "Bash":      return Card(name: "Bash", type: .attack, energyCost: 2, damage: 8, block: 0,
+                                      imageName: "card_bash_attack", vulnerableApply: 1)
+        case "Cleave":    return cleave()
+        case "Thunder":   return thunder()
+        case "Barricade": return barricade()
+        case "Poison":    return poison()
+        case "Fortify":   return fortify()
+        case "Turtle":    return turtle()
+        case "Catalyst":  return catalyst()
+        case "Slime":     return slime()
+        default:          return nil
+        }
     }
 
     /// The three cards offered at the Rest Site draft.
@@ -627,12 +666,20 @@ class GameEngine {
     var currentAct = 1
     var currentFloor = 1
 
-    // Gold rewards. `clearedFloors` tracks which floors have been won so the
-    // first-win bonus is only granted once per floor. `lastGoldEarned` /
-    // `lastFirstWinBonus` feed the victory screen's reward breakdown.
+    // Gold rewards. `lastGoldEarned` / `lastBonusGold` feed the victory screen's reward
+    // breakdown. `clearedFloors` records which floors have been won.
     var clearedFloors: Set<Int> = []
     var lastGoldEarned = 0
-    var lastFirstWinBonus = 0
+    /// The "Clean Fight" bonus from the floor just won (0 if it wasn't earned).
+    var lastBonusGold = 0
+    /// Whether the last floor's bonus was earned — the victory screen labels the chip.
+    var lastBonusEarned = false
+    /// HP lost during the current combat, for the Clean Fight bonus.
+    var damageTakenThisCombat = 0
+
+    /// Damage you can take and still earn the Clean Fight bonus: a quarter of max HP
+    /// (20 at the base 80). Scales with CON, so it stays reachable as the run goes on.
+    var cleanFightThreshold: Int { max(1, player.maxHp / 4) }
     var lastStatPoints = 0   // stat points from the just-won floor (victory screen)
 
     // Next-turn buffs (applied at the start of the player's turn)
@@ -759,6 +806,10 @@ class GameEngine {
     var remainingEnergy: Int { player.currentEnergy - usedEnergy }
     var displayPlayerBlock: Int { player.currentBlock }
 
+    /// Bumped by every `startGame()` — launch and each Try Again. The view watches this to
+    /// replay the run's opening scene.
+    private(set) var runId = 0
+
     init() {
         startGame()
     }
@@ -824,19 +875,24 @@ class GameEngine {
         // LCK increases the gold enemies drop.
         let rawGold = enemies.reduce(0) { $0 + $1.goldReward }
         let base = Int((Double(rawGold) * (1.0 + player.derived.goldFind)).rounded())
-        let firstWin = !clearedFloors.contains(currentFloor)
-        let bonus = firstWin ? 15 : 0
+        // "Clean Fight" — clear the floor having lost at most a quarter of your max HP.
+        let clean = damageTakenThisCombat <= cleanFightThreshold
+        let bonus = clean ? 15 : 0
         clearedFloors.insert(currentFloor)
         player.gold += base + bonus
         lastGoldEarned = base
-        lastFirstWinBonus = bonus
+        lastBonusGold = bonus
+        lastBonusEarned = clean
 
         lastStatPoints = statPointsForFloor(currentFloor)
         player.unspentStatPoints += lastStatPoints
 
         // FTH heals a little after every combat.
         let heal = player.derived.combatEndHeal
-        if heal > 0 { player.currentHp = min(player.maxHp, player.currentHp + heal) }
+        if heal > 0 {
+            player.currentHp = min(player.maxHp, player.currentHp + heal)
+            AudioManager.shared.play(.heal)
+        }
 
         grantFloorRelics()
         grantFloorEquipment()
@@ -871,6 +927,7 @@ class GameEngine {
         enemy.currentHp = max(0, enemy.currentHp - (raw - absorbed))
         enemy.combatFlash = CombatFlash(text: crit ? "\(raw) CRIT!" : "\(raw)",
                                         kind: crit ? .crit : .damage)
+        AudioManager.shared.play(.attack)
     }
 
     // MARK: - Play Cards
@@ -919,9 +976,11 @@ class GameEngine {
         }
         if card.block > 0 {
             player.currentBlock += card.block
+            AudioManager.shared.play(.heal)
         }
         if card.doublesBlock {
             player.currentBlock *= 2   // Turtle
+            AudioManager.shared.play(.heal)
         }
         if card.energyNextTurn > 0 {
             extraEnergyNextTurn += card.energyNextTurn
@@ -946,6 +1005,7 @@ class GameEngine {
             if healed > 0 {
                 player.currentHp = min(player.maxHp, player.currentHp + healed)
                 player.combatFlash = CombatFlash(text: "+\(healed)", kind: .heal)
+                AudioManager.shared.play(.heal)
             }
         }
 
@@ -980,6 +1040,7 @@ class GameEngine {
                     target.currentHp = max(0, target.currentHp - dmg)   // direct
                     target.weak += 1                                    // -25% next turn
                     target.combatFlash = CombatFlash(text: "\(dmg)", kind: .poison)
+                    AudioManager.shared.play(.attack)
                     justTriggeredCombo = "POISON COMBO"
                 }
             }
@@ -998,6 +1059,7 @@ class GameEngine {
                     victim.currentHp = max(0, victim.currentHp - dmg)   // direct
                     victim.stun += 1
                     victim.combatFlash = CombatFlash(text: "\(dmg)", kind: .crit)
+                    AudioManager.shared.play(.attack)
                 }
                 player.currentBlock += 8
                 justTriggeredCombo = "SHIELD COMBO"
@@ -1028,12 +1090,17 @@ class GameEngine {
         }
 
         let remaining = incoming - player.currentBlock
+        let absorbedByBlock = min(incoming, player.currentBlock)
         player.currentBlock = max(0, player.currentBlock - incoming)
         if remaining > 0 {
             player.currentHp = max(0, player.currentHp - remaining)
+            damageTakenThisCombat += remaining     // Clean Fight bonus tracking
         }
         player.combatFlash = CombatFlash(text: guarded ? "\(incoming) GUARD" : "\(incoming)",
                                          kind: guarded ? .guarded : .damage)
+        // Guarding or soaking a hit on the shield reads as a block; only HP loss hurts.
+        if guarded || absorbedByBlock > 0 { AudioManager.shared.play(.block) }
+        if remaining > 0 { AudioManager.shared.play(.damage) }
     }
 
     /// Execute ONE enemy's queued move. The view calls this per enemy (in order) so a
@@ -1050,6 +1117,7 @@ class GameEngine {
             enemy.currentHp = max(0, enemy.currentHp - 3)
             enemy.poison -= 1
             enemy.combatFlash = CombatFlash(text: "3", kind: .poison)
+            AudioManager.shared.play(.attack)
             checkCombatResolution()
             if !enemy.isAlive || gameState != .playing { return }
         }
@@ -1088,13 +1156,16 @@ class GameEngine {
             enemy.currentBlock += block
             enemy.strength += strengthGain
             if clearsDebuffs { enemy.clearDebuffs() }
+            AudioManager.shared.play(.heal)
 
         case .defend(let block):
             enemy.currentBlock += block
+            AudioManager.shared.play(.heal)
 
         case .attackDefend(let damage, let block):
             dealDamageToPlayer(atk(damage))
             enemy.currentBlock += block
+            AudioManager.shared.play(.heal)
         }
 
         if enemy.weak > 0 { enemy.weak -= 1 }   // Weak lasts one turn
@@ -1160,6 +1231,15 @@ class GameEngine {
 
     var isBossFloor: Bool { currentFloor == 18 }
 
+    /// True for elite, mini-boss and boss encounters — they get the boss track instead of
+    /// the normal fight track. Derived from the enemies themselves (relic carriers,
+    /// guaranteed-drop mini-bosses, and the 100-gold boss) rather than hard-coded floors.
+    var isEliteOrBossEncounter: Bool {
+        enemies.contains {
+            $0.dropsRelic != nil || $0.guaranteedEquipmentDrops > 0 || $0.goldReward >= 100
+        }
+    }
+
     /// Rest floors allow drafting except the final one (Floor 16, heal only).
     var restDraftAllowed: Bool { currentFloor != 16 }
 
@@ -1169,6 +1249,7 @@ class GameEngine {
         targetIndex = 0
         for enemy in enemies { enemy.advanceIntent(forTurn: 1) }
 
+        damageTakenThisCombat = 0     // fresh slate for the Clean Fight bonus
         player.currentBlock = 0
         player.currentEnergy = effectiveMaxEnergy
         extraEnergyNextTurn = 0
@@ -1251,9 +1332,11 @@ class GameEngine {
             enemies = []
             stockShop()
             gameState = .shop
+            saveRun()
             return
         }
         setupCurrentFloor()
+        saveRun()   // checkpoint each floor, so quitting mid-run doesn't lose it
     }
 
     /// Leave the shop and start Floor 11's combat.
@@ -1262,6 +1345,12 @@ class GameEngine {
     }
 
     // MARK: - Dev tools
+
+    /// Re-enter the current floor from its start (used when loading a run that wasn't
+    /// saved on a result screen — combat is rebuilt rather than resumed mid-fight).
+    func restoreCurrentFloor() {
+        setupCurrentFloor()
+    }
 
     /// Dev-only: jump straight to any floor and configure its encounter/rest/boss,
     /// bypassing normal progression (no rewards granted). Used by the DEV floor picker.
@@ -1338,6 +1427,7 @@ class GameEngine {
     /// gold and relics wiped, deck back to the 10-card starter, first-win history
     /// cleared. Used at launch and by the "Try Again" button.
     func startGame() {
+        runId += 1
         player.currentBlock = 0
         player.gold = 0
         player.statAllocations = [:]      // maxHp is computed → clears any CON bonus too
@@ -1352,7 +1442,9 @@ class GameEngine {
         justEarnedEquipment = []
         clearedFloors = []
         lastGoldEarned = 0
-        lastFirstWinBonus = 0
+        lastBonusGold = 0
+        lastBonusEarned = false
+        damageTakenThisCombat = 0
         lastStatPoints = 0
         shopCards = []
         shopRelics = []
@@ -1371,6 +1463,7 @@ class GameEngine {
         let base = Double(player.maxHp) * 0.30
         let healAmount = Int((base * player.derived.incomingHeal).rounded())
         player.currentHp = min(player.maxHp, player.currentHp + healAmount)
+        AudioManager.shared.play(.heal)
         advanceFloor()
     }
 
