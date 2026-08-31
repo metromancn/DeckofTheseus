@@ -56,7 +56,9 @@
     track keeps running silently so raising the bar resumes it instantly. Looping music only,
     never SFX.
   * **Sound Effects** — a plain on/off.
-  * **Developer** — Go to Stage (floor picker) and Win Fight.
+  * **Developer** — Go to Stage (floor picker), Win Fight, **Die Now** (0 HP, to exercise the
+    revive offer → defeat path) and **Remove Gems** (empties the wallet, to test the
+    "can't afford → Buy Gems" branch).
   * **Save & Quit to Title**, and Resume.
   * Both audio settings apply live and persist between launches.
 
@@ -97,6 +99,39 @@ The title plays `sfx_introloop`; **Start Run / New Run / Continue Run** fire `sf
 * **Rest Site / Card Draft / Shop / Act Complete / relic + equipment reveal banners / combo
   banner** — see below.
 
+## 4b. Revive (Gems)
+When HP hits 0 the run doesn't end immediately: a **REVIVE** prompt appears — a title, one
+narrative nudge ("Get up. The kingdom is still waiting."), the cost and your balance, and
+either **Revive** (enough Gems) or **Buy Gems** (not enough), alongside **No Thanks**.
+
+* **Once per run, ever.** `reviveUsed` lives on the engine, resets only in `startGame()`, and
+  is **persisted in the save** — Save & Quit → Continue can't hand it back. If it's already
+  spent, the prompt never appears and HP-0 goes straight to defeat.
+* **Reward earned →** back to **40% of max HP** (32 at base 80, scales with CON), debuffs
+  cleared, Block reset, and the **interrupted enemy turn ends there** — enemies still queued
+  to act don't get to, so the revive can't be spent and immediately wasted. A fresh hand is
+  dealt and it's your turn.
+* **Declined →** normal defeat. Declining does *not* spend the revive or any Gems.
+* Because the prompt is its own `GameState` (`.reviveOffer`), the defeat path — lose stinger,
+  the 3-line defeat card, clearing the save — only fires once the offer is turned down.
+* **Gems** (`GemStore.swift`) are the premium currency: bought with real money, and unlike
+  Gold they belong to the **player, not the run** — stored in `UserDefaults`, untouched by
+  `startGame()` and absent from the run save, so they survive death, new runs and relaunches.
+  A revive costs `GemStore.reviveCost` (10).
+* **Gem bar** — a pill (gem icon, balance, and a **+** that opens the shop) sits top-right
+  **everywhere**, including the title page, so Gems can be bought without having to die first.
+  In-run the Settings gear sits beside it. Both hide behind a dialogue scene, the gem shop and
+  the settings panel, which own the screen while they're up.
+* **Purchasing** goes through `GemStore.purchase(_:)`, the single storefront touchpoint.
+  `GemStore.packs` lists the buyable bundles (`earn_15_gems` → 15 Gems); adding a pack is one
+  array entry. The RevenueCat implementation (Offering `"default"`, matched by product id) is
+  live: the **RevenueCat SPM package (purchases-ios 5.87.1) is installed**, and
+  `Purchases.configure(withAPIKey:)` runs at launch in `DeckTheseusApp.init()` using
+  `GemStore.apiKey`. That key is RevenueCat's **Test Store** key (`test_` prefix), so
+  purchases are simulated and never charge anyone — a real App Store build would need the
+  `appl_` key instead. The `#if canImport(RevenueCat)` guards remain so the project still
+  builds if the package is ever removed.
+
 ## 5. The Game Loop — Act 1 (18 floors, Slime Biome)
 Encounters are **fixed per floor** (`setupCurrentFloor()`), hand-tuned into a fair curve.
 
@@ -131,10 +166,11 @@ variety / a second biome is the intended cure for repetition _(planned)_.
 * **Block** absorbs damage like temp HP and **resets at the start of each side's own turn**
   (after it has absorbed the opponent's hits). **Barricade** stops the player's block resetting
   for that combat.
-* **Player attacks** roll **Crit** (per hit; ×Crit Damage), then Vulnerable, then the enemy's
-  block absorbs. **Incoming hits** roll **Dodge** (negate) → **Guard** (reduce by Guard DR) →
-  block shield → HP. **Each enemy attacks as its own hit**, so multi-enemy turns are separate
-  hits and Guard/Dodge roll per hit.
+* **Both sides run the same stat system.** A player attack rolls the player's Crit, then the
+  **enemy's Dodge** (negates outright — no Thorns either) and **Guard**, then Vulnerable, then
+  its block. An enemy attack rolls **that enemy's Crit**, then the player's Dodge → Guard →
+  block → HP. **Each enemy attacks as its own hit**, so multi-enemy turns roll separately.
+  Enemy stat spreads express identity — see §13.
 * **Reshuffle** discard→draw when empty. **Exhaust** cards leave the deck until next combat.
 
 ### Status effects — universal
@@ -150,7 +186,7 @@ statuses lose a stack at the start of their owner's own turn; buffs last the com
 | **Frail** | gains −25% Block from every source; −1/turn | **Acid Slime** (Corrode) | Corrode card |
 | **Stun** | skips its turn (Poison still bites); −1/turn | — *(held back deliberately: losing a whole turn is too punishing)* | Shield Combo |
 | **Strength** | +flat damage dealt (lasts the combat) | — | Harden |
-| **Thorns** | attackers take that much, **bypassing Block** (lasts the combat) | Spikes card | **Spiked Slime** (innate 3) |
+| **Thorns** | whatever attacks it takes that much, **bypassing Block** (lasts the combat); a fully dodged hit never made contact, so it doesn't trigger | Spikes card | **Spiked Slime** (innate 3) |
 
 **Harden** (boss) clears Vulnerable / Poison / Weak / Frail from itself; Strength and Thorns
 survive, being buffs. Statuses never carry between fights. Badges and hover/hold explanations
@@ -258,7 +294,6 @@ looked up by `DialogueTrigger` in `DialogueScript.scenes`; adding beats never to
 | Acid Slime pre / post | before / after Floor 5 | 2 / 1 |
 | Spiked Slime pre / post | before / after Floor 13 | 3 / 1 |
 | Slime King pre / epilogue | before / after Floor 18 | 4 / 5 |
-| Defeat | on death | 3 |
 
 * **Post-fight scenes land before the reward banners + VICTORY screen** — a dying taunt after
   a rewards screen reads wrong.
@@ -268,9 +303,9 @@ looked up by `DialogueTrigger` in `DialogueScript.scenes`; adding beats never to
   **Try Again** after a defeat — but *not* at app launch (the title comes first) and not on
   *Continue Run*. A black curtain covers the frame between a run starting and its opening
   scene rendering, so the arena never flashes.
-* **Defeat** differs only in presentation — every line is a caption, so it's an **auto-timed
-  card** (no taps needed; any tap skips) rather than a tap-through scene. All 3 lines play on
-  every death. Basic/Red Slime have no dialogue.
+* **Death has no dialogue** — it goes straight to the REVIVE prompt, then the DEFEAT screen.
+  Basic/Red Slime have no dialogue either. (`DialoguePresentation.autoTimed` still exists for
+  future caption-only cards, but nothing uses it.)
 * **Backdrops:** `.arena` (battlefield visible + dimmed — the pre/post-fight banter) or
   `.art("name")` (full-screen story art replacing the arena). A **line** can also set one,
   and the change **sticks** until another line changes it, so a scene can cut between images
@@ -326,6 +361,18 @@ For the same reason `playMusic` only treats a repeat request as a no-op while th
 
 ## 13. Enemies (Act 1)
 Telegraphed intents; each walks a repeating rotation by turn.
+
+Each enemy carries a `stats` spread feeding the same `DerivedStats.derive()` the player uses,
+so they crit, dodge and guard by identical formulas (everyone has a 5% dodge / 5% crit floor):
+
+| Enemy | Stats | Dodge | Guard | Crit | Identity |
+|-------|-------|------:|------:|-----:|----------|
+| Slime | — | 5.0% | 0% | 5.0% | baseline; teaches the basics |
+| Red Slime | DEX 20, LCK 10 | 8.2% | 0% | 11.0% | quick and reckless — slips hits, crits often |
+| Acid Slime | STR 18, CON 20, DEX 8 | 6.5% | 6.0% | 8.5% | elite, sturdier all round |
+| Spiked Slime | STR 45, CON 30, DEX 4 | 5.8% | 12.5% | 11.2% | armoured — guards a lot, rarely dodges |
+| Giant Slime | STR 30, CON 55 | 5.0% | 9.2% | 8.8% | a wall — soaks hits, too big to dodge |
+| Slime King | STR 45, DEX 22, CON 45, LCK 20 | 8.5% | 12.5% | 19.9% | strong at everything |
 
 | Enemy | Role | HP | Gold | Rotation |
 |-------|------|---:|-----:|----------|

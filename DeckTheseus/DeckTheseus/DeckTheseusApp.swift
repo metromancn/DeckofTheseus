@@ -5,12 +5,20 @@ import CoreText
 struct DeckTheseusApp: App {
     init() {
         Self.registerFonts()
+        Self.configurePurchases()
     }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
         }
+    }
+
+    /// Hand RevenueCat its API key at launch. `GemStore.ensureConfigured()` is the single
+    /// implementation, so previews (which never run this initialiser) configure themselves
+    /// on first use instead of crashing.
+    private static func configurePurchases() {
+        GemStore.ensureConfigured()
     }
 
     private static func registerFonts() {

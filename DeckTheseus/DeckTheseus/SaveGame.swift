@@ -58,6 +58,9 @@ struct RunSave: Codable {
     var lastBonusGold: Int
     var lastBonusEarned: Bool
     var lastStatPoints: Int
+    /// Whether this run's one revive is already spent — persisted so Save & Quit →
+    /// Continue can't restore it.
+    var reviveUsed: Bool?
 }
 
 /// Where a run lives between launches.
@@ -102,7 +105,8 @@ extension GameEngine {
             lastGoldEarned: lastGoldEarned,
             lastBonusGold: lastBonusGold,
             lastBonusEarned: lastBonusEarned,
-            lastStatPoints: lastStatPoints
+            lastStatPoints: lastStatPoints,
+            reviveUsed: reviveUsed
         )
     }
 
@@ -142,6 +146,7 @@ extension GameEngine {
         lastBonusGold = save.lastBonusGold
         lastBonusEarned = save.lastBonusEarned
         lastStatPoints = save.lastStatPoints
+        restoreReviveUsed(save.reviveUsed ?? false)
 
         justEarnedRelic = nil
         justEarnedEquipment = []

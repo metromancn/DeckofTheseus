@@ -62,7 +62,7 @@ enum DialoguePresentation {
     /// Player taps (or clicks) to move to the next line. Used by the story scenes.
     case tapToAdvance
     /// Lines fade through on a timer with no input needed; a tap skips the whole scene.
-    /// Used for caption cards like the defeat interlude.
+    /// For caption-only cards; nothing uses it at present.
     case autoTimed(perLine: Double)
 }
 
@@ -159,16 +159,8 @@ enum DialogueScript {
 
     static func scene(for trigger: DialogueTrigger) -> DialogueScene? { scenes[trigger] }
 
-    // MARK: Defeat interlude
-    //
-    // Every line is a caption, so this is presented as an auto-timed card rather than a
-    // tap-through dialogue. Like every other scene it plays in full on every death.
-
-    static let defeatScene = DialogueScene(id: "defeat", lines: [
-        .caption("The knight falls, swallowed by the tide."),
-        .caption("But slime is patient. So, it turns out, is fate."),
-        .caption("The knight rises again."),
-    ], presentation: .autoTimed(perLine: 1.5))
+    // (There is deliberately no defeat scene — death drops straight to the DEFEAT screen.
+    // `DialoguePresentation.autoTimed` remains available for future caption cards.)
 
     /// Is this image actually in the asset catalog yet? Lets a scene declare its artwork
     /// before the art exists and fall back to a placeholder in the meantime.

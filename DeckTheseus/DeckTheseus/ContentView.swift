@@ -327,9 +327,9 @@ struct StatusRowView: View {
                                     if hovering { hovered = badge.id }
                                     else if hovered == badge.id { hovered = nil }
                                 }
-                                .onLongPressGesture(minimumDuration: 0.2) {
-                                    hovered = (hovered == badge.id) ? nil : badge.id
-                                }
+                                .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
+                                    hovered = pressing ? badge.id : nil
+                                }, perform: {})
                         }
                     }
                 }
@@ -483,6 +483,11 @@ struct ContentView: View {
     // Loading a run moves floor/state, which would otherwise re-fire stingers and scenes
     // for events the player already lived through.
     @State private var isRestoringRun = false
+    // Gem shop, shown from the revive prompt when the player can't afford it.
+    @State private var showGemShop = false
+    /// Mirror of `GemWallet.balance` (UserDefaults isn't observable) so the UI refreshes.
+    @State private var gemBalance = 0
+
     // The enemy whose status description is open — drawn above the others while it shows.
     @State private var statusTooltipEnemyId: UUID? = nil
 
@@ -542,7 +547,6 @@ struct ContentView: View {
             let unit = min(geo.size.width, geo.size.height)
             let cardH = min(unit * 0.30, 260.0)
             let cardW = cardH * 0.72
-            let bossH = min(unit * 0.38, 320.0)
             let heartSize = min(unit * 0.12, 80.0)
             let nameFont = min(unit * 0.028, 18.0)
             let titleFont = min(unit * 0.030, 20.0)
@@ -1033,6 +1037,9 @@ struct ContentView: View {
                     } else if engine.gameState == .victory {
                         victoryOverlay(unit: unit, btnFontSize: btnFontSize)
                             .zIndex(999)
+                    } else if engine.gameState == .reviveOffer {
+                        reviveOfferOverlay(unit: unit, btnFontSize: btnFontSize)
+                            .zIndex(999)
                     } else if engine.gameState == .defeat {
                         defeatOverlay(unit: unit, btnFontSize: btnFontSize)
                             .zIndex(999)
@@ -1078,7 +1085,7 @@ struct ContentView: View {
                                     exitToTitle(runFinished: true)   // back to the title page
                                 }
 
-                            case .victory, .defeat, .shop, .drafting, .playing:
+                            case .victory, .defeat, .shop, .drafting, .playing, .reviveOffer:
                                 EmptyView()
                             }
                         }
@@ -1086,22 +1093,33 @@ struct ContentView: View {
                     }
                 }
 
-                // Settings (top-right). Hidden on the title page and during a dialogue
-                // scene, so it never collides with their own controls.
-                if !showTitle && activeScene == nil {
-                    Button { showSettings = true } label: {
-                        Image(systemName: "gearshape.fill")
-                            .font(.system(size: titleFont * 1.05))
-                            .foregroundColor(.textParchment)
-                            .padding(9)
-                            .background(Circle().fill(Color(hex: 0x1A1228).opacity(0.85)))
-                            .overlay(Circle().stroke(Color.goldBorder, lineWidth: 1.5))
+                // Top-right cluster: the Gem balance (everywhere, title page included, so
+                // Gems can be bought without having to die first) and the Settings gear
+                // (in-run only). Hidden behind a dialogue scene, the gem shop and settings,
+                // which own the screen while they're up.
+                if activeScene == nil && !showGemShop && !showSettings {
+                    HStack(spacing: 12) {
+                        GemBarView(balance: gemBalance, size: titleFont) {
+                            showGemShop = true
+                        }
+
+                        if !showTitle {
+                            Button { showSettings = true } label: {
+                                Image(systemName: "gearshape.fill")
+                                    .font(.system(size: titleFont * 1.05))
+                                    .foregroundColor(.textParchment)
+                                    .padding(9)
+                                    .background(Circle().fill(Color(hex: 0x1A1228).opacity(0.85)))
+                                    .overlay(Circle().stroke(Color.goldBorder, lineWidth: 1.5))
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
-                    .buttonStyle(.plain)
                     .padding(.trailing, 20)
                     .padding(.top, 32)   // sits level with the gold / STATS block
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                    .zIndex(1500)
+                    // Above the title page (3000) so the bar is reachable there too.
+                    .zIndex(3100)
                 }
 
                 if showSettings {
@@ -1134,6 +1152,21 @@ struct ContentView: View {
                         .zIndex(2500)
                 }
 
+                // Gem purchase screen, opened from the revive prompt.
+                if showGemShop {
+                    GemShopView(balance: gemBalance,
+                                size: geo.size,
+                                onPurchased: { gemBalance = GemWallet.balance },
+                                onClose: {
+                                    showGemShop = false
+                                    gemBalance = GemWallet.balance
+                                })
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                        // Above the title page (3000) — the gem bar can open the shop there.
+                        .zIndex(3200)
+                }
+
                 // Title page — owns the whole screen; nothing of the run shows through.
                 if showTitle {
                     titleScreen(unit: unit, size: geo.size)
@@ -1154,6 +1187,7 @@ struct ContentView: View {
             audioSession = AudioManager.shared.beginSession()
             // The title page owns the screen at launch — the run begins on "Start Game".
             hasSave = SaveStore.hasSave
+            gemBalance = GemWallet.balance
             musicVolume = AudioManager.shared.musicVolume
             sfxOn = AudioManager.shared.sfxEnabled
             if showTitle { AudioManager.shared.playMusic(.intro) }
@@ -1187,13 +1221,15 @@ struct ContentView: View {
                 // however the player leaves this screen.
                 SaveStore.clear()
                 hasSave = false
-                Task { @MainActor in await playScene(DialogueScript.defeatScene) }
             default: break
             }
             syncMusic()
         }
         // Entering/leaving the stats screen swaps to (and back from) the rest track.
-        .onChange(of: showCharacter) { _, _ in syncMusic() }
+        .onChange(of: showCharacter) { _, _ in
+            statTooltip = nil          // never reopen the screen with a stale bubble up
+            syncMusic()
+        }
     }
 
     // MARK: - DEV floor picker
@@ -1318,7 +1354,7 @@ struct ContentView: View {
             track = .rest                     // stats screen — out of the fight
         } else {
             switch engine.gameState {
-            case .playing:
+            case .playing, .reviveOffer:
                 track = engine.isEliteOrBossEncounter ? .boss : .fight
             case .restSite, .drafting, .shop, .actComplete, .victory:
                 track = .rest                 // resting, drafting, shopping, after a win
@@ -1327,6 +1363,70 @@ struct ContentView: View {
             }
         }
         AudioManager.shared.playMusic(track)
+    }
+
+    // MARK: - Revive
+
+    /// Offered once per run, the moment HP hits 0 — the defeat screen and everything that
+    /// goes with it (stinger, defeat card, clearing the save) hold until this is declined.
+    private func reviveOfferOverlay(unit: CGFloat, btnFontSize: CGFloat) -> some View {
+        let cost = GemStore.reviveCost
+        let affordable = gemBalance >= cost
+        return VStack(spacing: unit * 0.03) {
+            overlayTitle("REVIVE", size: min(unit * 0.10, 68), color: .goldBright)
+
+            Text("Get up. The kingdom is still waiting.")
+                .font(.pixel(btnFontSize * 0.95))
+                .foregroundColor(.textMuted)
+                .multilineTextAlignment(.center)
+
+            // Cost, and what they're holding.
+            HStack(spacing: 10) {
+                GemIcon(size: btnFontSize)
+                Text("\(cost) Gems")
+                    .font(.pixel(btnFontSize))
+                    .foregroundColor(.textParchment)
+                Text("(you have \(gemBalance))")
+                    .font(.pixel(btnFontSize * 0.8))
+                    .foregroundColor(affordable ? .textMuted : Color(hex: 0xC0455E))
+            }
+
+            HStack(spacing: unit * 0.04) {
+                if affordable {
+                    victoryButton("Revive", fontSize: btnFontSize, tint: Color(hex: 0x2C6E3C)) {
+                        reviveWithGems()
+                    }
+                } else {
+                    victoryButton("Buy Gems", fontSize: btnFontSize, tint: Color(hex: 0x2F6FA8)) {
+                        showGemShop = true
+                    }
+                }
+                victoryButton("No Thanks", fontSize: btnFontSize, tint: Color(hex: 0x4A90C2)) {
+                    engine.declineRevive()
+                }
+            }
+        }
+    }
+
+    /// Spend Gems and revive. The revive itself is untouched — only its trigger changed.
+    private func reviveWithGems() {
+        guard GemWallet.spend(GemStore.reviveCost) else { return }
+        gemBalance = GemWallet.balance
+        completeRevive()
+    }
+
+    /// Reward earned: back on your feet, and the interrupted enemy turn ends there — the
+    /// enemies still queued to act don't get to, so the revive can't be spent for nothing.
+    private func completeRevive() {
+        engine.revive()
+        isEnemyTurn = false
+        engine.isResolvingTurn = false
+        isProcessingPlays = false
+        pendingPlays.removeAll()
+        resolvingCard = nil
+        engine.discardHand()
+        engine.beginNextTurn()
+        dealNewHand()
     }
 
     // MARK: - Settings
@@ -1428,6 +1528,23 @@ struct ContentView: View {
                             Task { @MainActor in await handleCombatWon() }
                         }
                         .opacity(engine.gameState == .playing ? 1 : 0.45)
+                    }
+                    HStack(spacing: unit * 0.014) {
+                        // Straight to 0 HP — exercises the revive offer, then defeat.
+                        settingsButton("Die Now", font: f * 0.9, tint: Color(hex: 0x3A1E24)) {
+                            guard engine.gameState == .playing,
+                                  !engine.isResolvingTurn, !isProcessingPlays else { return }
+                            showSettings = false
+                            isEnemyTurn = false
+                            engine.devKillPlayer()
+                        }
+                        .opacity(engine.gameState == .playing ? 1 : 0.45)
+
+                        // Empty the wallet, to test the "can't afford → Buy Gems" path.
+                        settingsButton("Remove Gems", font: f * 0.9, tint: Color(hex: 0x2A1E3A)) {
+                            GemWallet.balance = 0
+                            gemBalance = 0
+                        }
                     }
                 }
 
@@ -1986,9 +2103,9 @@ struct ContentView: View {
                 if hovering { statTooltip = stat }
                 else if statTooltip == stat { statTooltip = nil }
             }
-            .onLongPressGesture(minimumDuration: 0.2) {
-                statTooltip = (statTooltip == stat) ? nil : stat
-            }
+            .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
+                statTooltip = pressing ? stat : nil
+            }, perform: {})
 
             Text("(\(total))")
                 .font(.pixel(bodyFont * 0.9))
@@ -2558,11 +2675,11 @@ struct ContentView: View {
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(delay))
                 withAnimation(.easeOut(duration: 0.28)) {
-                    draftDealtIds.insert(card.id)
+                    _ = draftDealtIds.insert(card.id)
                 }
                 try? await Task.sleep(for: .seconds(0.28))
                 withAnimation(.easeInOut(duration: 0.08)) {
-                    draftRevealedIds.insert(card.id)
+                    _ = draftRevealedIds.insert(card.id)
                 }
             }
         }
@@ -2672,6 +2789,11 @@ struct ContentView: View {
                     : [play.targetIndex]
                 engine.resolveCardEffect(card, targetIndex: play.targetIndex)
 
+                // This card may have ended the combat. Claim the turn NOW, before any
+                // `await` below — otherwise the VICTORY/REVIVE screen flashes on during
+                // the hit animation and hides again once the reveals start.
+                if engine.gameState != .playing { engine.isResolvingTurn = true }
+
                 if willAttack { for idx in attackedIndices { setEnemyVFX(.attack, at: idx) } }
                 if willShield { setPlayerVFX(.healDebuff) }
                 let anim = max(willAttack ? attackAnimDuration : 0, willShield ? healAnimDuration : 0)
@@ -2687,12 +2809,9 @@ struct ContentView: View {
                 }
 
                 // The floor's post-fight scene lands first — a dying taunt reads wrong
-                // after a rewards screen. Claim the turn first: resolving a card sets
-                // .victory immediately, and without this the VICTORY screen would draw
-                // underneath the scene and the reward banners instead of waiting for them.
-                // (`handleCombatWon` clears it once every reveal has been dismissed.)
+                // after a rewards screen. (`handleCombatWon` releases the turn once every
+                // reveal has been dismissed.)
                 if engine.gameState == .victory {
-                    engine.isResolvingTurn = true
                     await playFloorEndScene()
                 }
 
@@ -2700,7 +2819,11 @@ struct ContentView: View {
                 await revealEarnedRelicIfAny()
                 if engine.gameState != .playing {
                     pendingPlays.removeAll()   // combat ended — drop any remaining queued cards
-                    if engine.gameState == .victory { await handleCombatWon() }
+                    if engine.gameState == .victory {
+                        await handleCombatWon()          // releases the turn at the end
+                    } else {
+                        engine.isResolvingTurn = false   // let the revive/defeat screen show
+                    }
                     isProcessingPlays = false
                     return
                 }
@@ -2847,14 +2970,14 @@ struct ContentView: View {
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(slideDelay))
                 withAnimation(.easeOut(duration: 0.28)) {
-                    dealtCardIds.insert(card.id)
+                    _ = dealtCardIds.insert(card.id)
                 }
                 try? await Task.sleep(for: .seconds(0.28))
                 // Fire the flip a hair before the animation: audio goes through an output
                 // buffer, the frame doesn't. One per card, never debounced away.
                 AudioManager.shared.play(.cardFlip, debounced: false)
                 withAnimation(.easeInOut(duration: 0.08)) {
-                    revealedCardIds.insert(card.id)
+                    _ = revealedCardIds.insert(card.id)
                 }
             }
         }
@@ -2866,19 +2989,27 @@ struct ContentView: View {
 /// A card's rules text with any number a status has moved picked out in colour —
 /// red when a debuff shrank it (Frail on Block, Weak on damage), green when a buff grew it.
 func cardRulesText(_ card: Card, status: StatusEffects, base: Color = .textParchment) -> Text {
-    var out = Text("")
+    /// One coloured run of the sentence.
+    func run(_ string: String, _ color: Color, bold: Bool = false) -> AttributedString {
+        var piece = AttributedString(string)
+        piece.foregroundColor = color
+        if bold { piece.inlinePresentationIntent = .stronglyEmphasized }
+        return piece
+    }
+
+    var out = AttributedString()
     for (index, part) in card.descriptionParts(for: status).enumerated() {
-        if index > 0 { out = out + Text(" ").foregroundColor(base) }
-        out = out + Text(part.prefix).foregroundColor(base)
+        if index > 0 { out += run(" ", base) }
+        out += run(part.prefix, base)
         if let value = part.value {
             let tint: Color = part.change == nil
                 ? base
                 : (part.change == .reduced ? Color(hex: 0xE2564F) : Color(hex: 0x76E06A))
-            out = out + Text(value).foregroundColor(tint).bold()
+            out += run(value, tint, bold: part.change != nil)
         }
-        out = out + Text(part.suffix).foregroundColor(base)
+        out += run(part.suffix, base)
     }
-    return out
+    return Text(out)
 }
 
 struct CardView: View {

@@ -16,6 +16,7 @@ enum GameState: String {
     case playing
     case victory
     case defeat
+    case reviveOffer   // HP hit 0 and a revive is still available — offer it before defeat
     case restSite      // Rest floors — choose Heal or Draft
     case drafting      // Rest floors — pick a card to add to the deck
     case shop          // Between Floor 9 and Floor 10
@@ -565,6 +566,10 @@ class Enemy: Identifiable {
     var currentHp: Int
     var currentBlock = 0
     var status = StatusEffects()
+    /// Enemies run the SAME stat system as the player — they crit, dodge and guard by the
+    /// identical formulas. Each enemy's spread expresses its identity.
+    var stats: [StatKind: Int]
+    var derived: DerivedStats { DerivedStats.derive(stats) }
     var vfx: SpriteVFX = .none
     var combatFlash: CombatFlash? = nil
 
@@ -596,7 +601,8 @@ class Enemy: Identifiable {
     init(name: String, maxHp: Int, spriteName: String,
          spriteContentW: CGFloat, spriteContentH: CGFloat, rotation: [EnemyIntent],
          spriteScale: CGFloat = 1.0, dropsRelic: Relic? = nil, goldReward: Int = 15,
-         guaranteedEquipmentDrops: Int = 0) {
+         guaranteedEquipmentDrops: Int = 0, stats: [StatKind: Int] = [:]) {
+        self.stats = stats
         self.name = name
         self.maxHp = maxHp
         self.currentHp = maxHp
@@ -642,7 +648,8 @@ class Enemy: Identifiable {
         Enemy(name: "Slime", maxHp: 30, spriteName: "enemy_slime_basic",
               spriteContentW: 0.453, spriteContentH: 0.375,
               rotation: [.tackle(baseDamage: 5)],
-              spriteScale: 0.5)
+              spriteScale: 0.5,
+              stats: [:])   // the tutorial enemy: baseline reflexes only
     }
 
     /// Normal — glass-cannon slime: hits for 8, then blocks 3.
@@ -650,7 +657,8 @@ class Enemy: Identifiable {
         Enemy(name: "Red Slime", maxHp: 20, spriteName: "enemy_red_slime_basic",
               spriteContentW: 0.453, spriteContentH: 0.375,
               rotation: [.tackle(baseDamage: 8), .defend(block: 3)],
-              spriteScale: 0.5)
+              spriteScale: 0.5,
+              stats: [.dex: 20, .lck: 10])   // quick and reckless: slips hits, crits often
     }
 
     /// Elite (Floor 5) — corrodes (9 damage + 2 Frail, so your Block is worth less), then
@@ -659,7 +667,8 @@ class Enemy: Identifiable {
         Enemy(name: "Acid Slime", maxHp: 55, spriteName: "enemy_acid_slime_elite",
               spriteContentW: 0.453, spriteContentH: 0.375,
               rotation: [.corrode(damage: 9, frailTurns: 2), .defend(block: 15)],
-              spriteScale: 0.78, dropsRelic: .vampireTooth, goldReward: 30)
+              spriteScale: 0.78, dropsRelic: .vampireTooth, goldReward: 30,
+              stats: [.str: 18, .con: 20, .dex: 8])   // elite: sturdier all round
     }
 
     /// Elite (Floor 13) — attacks for 8, then hits 5 while gaining 10 block.
@@ -668,7 +677,8 @@ class Enemy: Identifiable {
         let e = Enemy(name: "Spiked Slime", maxHp: 72, spriteName: "enemy_spiked_slime_elite",
                       spriteContentW: 0.453, spriteContentH: 0.438,
                       rotation: [.tackle(baseDamage: 8), .attackDefend(damage: 5, block: 10)],
-                      spriteScale: 0.65, dropsRelic: .mysteriousAmber, goldReward: 30)
+                      spriteScale: 0.65, dropsRelic: .mysteriousAmber, goldReward: 30,
+                      stats: [.str: 45, .con: 30, .dex: 4])   // armoured: guards a lot, rarely dodges
         e.status.thorns = 3   // its spikes bite anything that hits it
         return e
     }
@@ -680,7 +690,8 @@ class Enemy: Identifiable {
         Enemy(name: "Giant Slime", maxHp: 100, spriteName: "enemy_slime_basic",
               spriteContentW: 0.453, spriteContentH: 0.375,
               rotation: [.tackle(baseDamage: 12), .harden(block: 10, strengthGain: 1, clearsDebuffs: false)],
-              spriteScale: 0.95, goldReward: 50, guaranteedEquipmentDrops: 2)
+              spriteScale: 0.95, goldReward: 50, guaranteedEquipmentDrops: 2,
+              stats: [.str: 30, .con: 55, .dex: 0])   // a wall: soaks hits, too big to dodge
     }
 
     /// Boss (Floor 18) — the Act boss.
@@ -690,7 +701,8 @@ class Enemy: Identifiable {
               rotation: [.tackle(baseDamage: 12),
                          .gooSpit(slimeCount: 2, weakTurns: 2),
                          .harden(block: 15, strengthGain: 2, clearsDebuffs: true)],
-              goldReward: 100)
+              goldReward: 100,
+              stats: [.str: 45, .dex: 22, .con: 45, .lck: 20])   // boss: strong at everything
     }
 }
 
@@ -954,6 +966,35 @@ class GameEngine {
 
     // MARK: - Combat Resolution
 
+    /// Set once the run's single revive has been spent. Per RUN, not per combat, and it
+    /// rides along in the save so quitting and continuing can't hand it back.
+    private(set) var reviveUsed = false
+
+    /// Fraction of max HP restored by a revive.
+    private static let reviveHpFraction = 0.40
+
+    /// Spend the run's revive: back to 40% HP with a clean slate, combat resumed. The view
+    /// then starts a fresh player turn — the enemies that were still to act do not get to.
+    func revive() {
+        guard gameState == .reviveOffer else { return }
+        reviveUsed = true
+        player.currentHp = max(1, Int((Double(player.maxHp) * Self.reviveHpFraction).rounded()))
+        player.status.clearDebuffs()   // coming back Frail'd and Poisoned is just a slower death
+        player.currentBlock = 0
+        player.combatFlash = CombatFlash(text: "+\(player.currentHp)", kind: .heal)
+        gameState = .playing
+    }
+
+    /// Restore the flag when loading a run (it's `private(set)` so nothing else can grant
+    /// a revive back mid-run).
+    func restoreReviveUsed(_ used: Bool) { reviveUsed = used }
+
+    /// Turn the offer down (or the ad failed) — fall through to the normal defeat.
+    func declineRevive() {
+        guard gameState == .reviveOffer else { return }
+        gameState = .defeat
+    }
+
     private func checkCombatResolution() {
         guard gameState == .playing else { return }   // resolve only once per combat
         // A combat is "won" once every enemy is at 0 HP. The floor logic (auto-
@@ -963,7 +1004,8 @@ class GameEngine {
             gameState = .victory
         } else if player.currentHp <= 0 {
             player.currentHp = 0
-            gameState = .defeat
+            // Offer the revive first, unless this run has already spent it.
+            gameState = reviveUsed ? .defeat : .reviveOffer
         }
     }
 
@@ -1028,13 +1070,26 @@ class GameEngine {
         var hit = crit ? Int((Double(base) * d.critDamage).rounded()) : base
         // The attacker's own statuses shape what it deals…
         hit = player.status.damageDealt(hit)
-        // …and the defender's shape what it takes.
+        // The defender's own reflexes: Dodge negates outright, Guard softens.
+        let ed = enemy.derived
+        if Double.random(in: 0..<1) < ed.dodgeChance {
+            enemy.combatFlash = CombatFlash(text: "DODGE", kind: .dodge)
+            return                                    // nothing landed — no Thorns either
+        }
+        var guarded = false
+        if Double.random(in: 0..<1) < ed.guardChance {
+            hit = Int((Double(hit) * (1.0 - ed.guardDR)).rounded())
+            guarded = true
+        }
+
+        // …and the defender's statuses shape what it takes.
         let raw = max(0, Int(floor(Double(hit) * enemy.status.vulnerableMultiplier)))
         let absorbed = min(raw, enemy.currentBlock)
         enemy.currentBlock -= absorbed
         enemy.currentHp = max(0, enemy.currentHp - (raw - absorbed))
-        enemy.combatFlash = CombatFlash(text: crit ? "\(raw) CRIT!" : "\(raw)",
-                                        kind: crit ? .crit : .damage)
+        enemy.combatFlash = CombatFlash(
+            text: crit ? "\(raw) CRIT!" : (guarded ? "\(raw) GUARD" : "\(raw)"),
+            kind: crit ? .crit : (guarded ? .guarded : .damage))
         AudioManager.shared.play(.attack)
 
         // Thorns — hitting a spiked enemy costs you. Bypasses Block, like Poison.
@@ -1209,7 +1264,11 @@ class GameEngine {
     /// Apply an incoming `raw` hit to the player: first roll Dodge (negates the whole hit),
     /// then Guard (a chance to reduce it by Guard DR), then the Block shield absorbs, then
     /// HP. Flashes DODGE / GUARD / the damage number.
-    private func dealDamageToPlayer(_ raw: Int) {
+    ///
+    /// `attacker` is whoever swung, so the player's Thorns can bite back — the mirror of
+    /// the retaliation in `dealDamage`. A fully dodged hit never made contact, so it
+    /// doesn't trigger Thorns.
+    private func dealDamageToPlayer(_ raw: Int, from attacker: Enemy? = nil) {
         let d = player.derived
 
         // Dodge — negate the entire hit (and any status it would carry).
@@ -1218,8 +1277,18 @@ class GameEngine {
             return
         }
 
-        // Guard — a chance to soften this hit by Guard DR.
+        // The attacker's Crit, rolled on its own stats — the mirror of the player's.
         var incoming = raw
+        var attackerCrit = false
+        if let attacker {
+            let ad = attacker.derived
+            if Double.random(in: 0..<1) < ad.critChance {
+                incoming = Int((Double(incoming) * ad.critDamage).rounded())
+                attackerCrit = true
+            }
+        }
+
+        // Guard — a chance to soften this hit by Guard DR.
         var guarded = false
         if Double.random(in: 0..<1) < d.guardChance {
             incoming = Int((Double(incoming) * (1.0 - d.guardDR)).rounded())
@@ -1236,11 +1305,22 @@ class GameEngine {
             player.currentHp = max(0, player.currentHp - remaining)
             damageTakenThisCombat += remaining     // Clean Fight bonus tracking
         }
-        player.combatFlash = CombatFlash(text: guarded ? "\(incoming) GUARD" : "\(incoming)",
-                                         kind: guarded ? .guarded : .damage)
+        player.combatFlash = CombatFlash(
+            text: guarded ? "\(incoming) GUARD" : (attackerCrit ? "\(incoming) CRIT!" : "\(incoming)"),
+            kind: guarded ? .guarded : (attackerCrit ? .crit : .damage))
         // Guarding or soaking a hit on the shield reads as a block; only HP loss hurts.
         if guarded || absorbedByBlock > 0 { AudioManager.shared.play(.block) }
         if remaining > 0 { AudioManager.shared.play(.damage) }
+
+        // Thorns — whatever struck the player takes the hit back, bypassing its Block
+        // (same rule as the enemy-side retaliation and as Poison).
+        if player.status.thorns > 0, let attacker, attacker.isAlive {
+            let bite = player.status.thorns
+            attacker.currentHp = max(0, attacker.currentHp - bite)
+            attacker.combatFlash = CombatFlash(text: "\(bite)", kind: .damage)
+            AudioManager.shared.play(.attack)
+            checkCombatResolution()
+        }
     }
 
     /// Execute ONE enemy's queued move. The view calls this per enemy (in order) so a
@@ -1280,7 +1360,7 @@ class GameEngine {
 
         switch enemy.nextMove {
         case .tackle(let baseDamage):
-            dealDamageToPlayer(atk(baseDamage))
+            dealDamageToPlayer(atk(baseDamage), from: enemy)
 
         case .gooSpit(let count, let weakTurns):
             var slimeCards: [Card] = []
@@ -1304,12 +1384,12 @@ class GameEngine {
             AudioManager.shared.play(.heal)
 
         case .attackDefend(let damage, let block):
-            dealDamageToPlayer(atk(damage))
+            dealDamageToPlayer(atk(damage), from: enemy)
             enemy.currentBlock += enemy.status.blockGained(block)
             AudioManager.shared.play(.heal)
 
         case .corrode(let damage, let frailTurns):
-            dealDamageToPlayer(atk(damage))
+            dealDamageToPlayer(atk(damage), from: enemy)
             if frailTurns > 0 { player.status.frail += frailTurns }
         }
 
@@ -1586,6 +1666,7 @@ class GameEngine {
     /// cleared. Used at launch and by the "Try Again" button.
     func startGame() {
         runId += 1
+        reviveUsed = false        // one revive per run, refreshed only by a brand-new run
         player.currentBlock = 0
         player.gold = 0
         player.statAllocations = [:]      // maxHp is computed → clears any CON bonus too
@@ -1641,6 +1722,14 @@ class GameEngine {
     func skipDraft() {
         guard gameState == .drafting else { return }
         advanceFloor()
+    }
+
+    /// DEV ONLY — drop the player to 0 HP so the death flow (revive offer, then defeat)
+    /// can be tested without losing a fight for real.
+    func devKillPlayer() {
+        guard gameState == .playing else { return }
+        player.currentHp = 0
+        checkCombatResolution()
     }
 
     /// DEV ONLY — instantly kill every enemy so the round resolves as a normal win.
