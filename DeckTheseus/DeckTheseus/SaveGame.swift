@@ -98,7 +98,11 @@ extension GameEngine {
             unspentStatPoints: player.unspentStatPoints,
             equipped: Dictionary(uniqueKeysWithValues:
                 player.equippedItems.map { ($0.key.rawValue, SavedEquipment($0.value)) }),
-            inventory: player.equipmentInventory.map(SavedEquipment.init),
+            // Written as a closure, not `map(SavedEquipment.init)`: an unapplied reference to a
+            // main-actor-isolated initialiser converts to a *nonisolated* function type, which
+            // the compiler rightly flags. A closure written here inherits this context's
+            // isolation instead.
+            inventory: player.equipmentInventory.map { SavedEquipment($0) },
             relicNames: playerRelics.map(\.name),
             deckCardNames: deck.masterDeck.map(\.name),
             clearedFloors: Array(clearedFloors),
@@ -138,8 +142,9 @@ extension GameEngine {
         player.currentBlock = 0
         player.combatFlash = nil
 
-        playerRelics = save.relicNames.compactMap(Relic.named)
-        deck.masterDeck = save.deckCardNames.compactMap(Card.named)
+        // Closures rather than `compactMap(Relic.named)` — see the note in `makeSave()`.
+        playerRelics = save.relicNames.compactMap { Relic.named($0) }
+        deck.masterDeck = save.deckCardNames.compactMap { Card.named($0) }
         clearedFloors = Set(save.clearedFloors)
 
         lastGoldEarned = save.lastGoldEarned

@@ -8,10 +8,19 @@
 * **Genre:** solo Roguelike Deckbuilder + light RPG (stats, equipment).
 * **Platform:** native **SwiftUI** (iOS + macOS). `@Observable` drives all state
   (`GameEngine`, `Player`, `Enemy`, `DeckManager`).
-* **Visual Style:** hand-authored **pixel-art PNGs** trimmed at render time by `CroppedSprite`
-  (its crop box is exactly content-sized, so art sitting off-centre in its canvas gets shaved —
-  relic icons pass `clipToContent: false` to show the whole glyph).
+* **Visual Style:** hand-authored **pixel-art PNGs** trimmed at render time by `CroppedSprite`.
+  Its crop box is exactly content-sized and **centred**, so art that isn't centred in its
+  canvas renders wrong: relic icons pass `clipToContent: false` to avoid being shaved, and
+  enemies pass a measured `contentOffsetY` so every sprite stands on the same ground line
+  regardless of how tall its art is (the Spiked Slime's spikes make it taller, which
+  otherwise floated it above the other slimes).
   Font: **VT323**, registered at runtime.
+* **Arena background:** `fight_background` (1536×864, 14 colours, no anti-aliasing — pixel art
+  drawn on a large canvas, so `interpolation(.none)` is still correct). It is drawn `.fill`, then
+  covered by a **flat 34% black scrim plus a radial vignette**. The art is bright enough to
+  swallow the sprites, intent icons and HUD text, and one layer over the background fixes that
+  without touching a single UI element — per-element shadows would mean blurred halos against
+  hard pixel edges, in dozens of places.
 * **Key files:** `GameEngine.swift` (state + logic), `ContentView.swift` (all UI),
   `Dialogue.swift` (story scenes), `AudioManager.swift` (music + SFX),
   `SaveGame.swift` (run persistence), `DeckTheseusApp.swift` (entry + font).
@@ -29,11 +38,67 @@
 ## 3. Combat Screen & Interaction
 * **Top-left HUD:** Act-Floor, Turn, **gold** (coin + amount), owned **relic icons** (hover/hold
   for name + description), and a **STATS (N)** button (N = unspent stat points).
-* **Player left, enemies clustered right.** Each combatant shows a name, sprite, a **numeric HP
-  bar** (`cur/max`), a **shield** icon (block), and status badges. Enemy bars narrow when 3+
-  enemies are present so they never overlap the player's stats.
-* **Enemy intent** telegraphed per enemy; **▼ reticle** marks the target (tap a sprite to
-  retarget; an AOE card being dragged marks *all* enemies).
+* **Fighting-game HUD.** Every combatant's name plate, **numeric HP bar** (`cur/max`), **shield**
+  (block) and status badges sit in a fixed slot along the top of the screen — the player on the
+  **left**, enemies stacked downward on the **right** — not hanging off the sprite. Player bar
+  and enemy bars mirror each other, so each bar hugs its own screen edge with the status badges
+  trailing toward the middle. This is what frees the sprites to stand on the painted floor, and
+  it's the only way three enemies fit: the right ledge is ~275pt on a Mac window, which three
+  sprite-attached bars overrun twice over.
+  * The **player's** bar is the last row of the top-left HUD stack, so it always clears the gold
+    row however many relics have widened it — nothing to measure by hand. Its badges may wrap to
+    a second line (nothing sits below it). **Enemy** badges stay on one line so the stacked rows
+    keep a fixed height; a heavily statused fight can't grow the band down over the sprites.
+  * Bars are **slim** (`0.32 ×` the heart metric). At the old sprite-attached thickness three
+    stacked rows formed a solid block that crowded down onto the enemies.
+  * Badges render at **0.82×** the sprite-attached size: at full size a fully statused player and
+    a fully statused enemy reach far enough across the top to meet in the middle.
+  * HUD status bubbles drop **below** the badge (`tooltipBelow`) — docked at the top of the
+    screen there is no room above.
+* **Pairing a bar with a body — by selection.** Ten of the run's fifteen fights field two or
+  three *identically named* enemies ("Slime · Slime · Slime"), so with the bars docked at the top
+  a name tag alone can't say which bar is whose. **Tap an enemy sprite** (not its bar) and that
+  enemy glows gold *and* its bar, border and name plate go gold together; every other bar stays
+  plain. Bar order also always matches sprite order left-to-right. An earlier build gave each
+  enemy a persistent identity colour on both its bar and a stripe at its feet — replaced by this,
+  which keeps the arena clean at the cost of showing the link only for the selected enemy.
+* **Standing on the floor.** `ArenaGeometry` runs the same `contentMode: .fill` transform the
+  background image does, converting the art's own pixel coordinates to screen points. The ledge
+  the combatants stand on is a *measured constant off the art* (`floorArtY = 538`), not a screen
+  fraction — the same floor sits at 0.62 of the height in a Mac window and 0.65 on a phone in
+  landscape, so a hardcoded fraction drifts. Both sides are positioned by their feet. Ledge spans
+  are also clamped to the **safe area**: the root view is `ignoresSafeArea`, which is right for
+  the art (it should fill the window) but put the far enemy under the **Dynamic Island** in
+  landscape — so combatants and the enemy bars are inset by `geo.safeAreaInsets`. On an iPhone
+  that costs the right ledge ~58pt, which the fit-scale then absorbs.
+* **The enemy line is fitted to the stone.** Its natural width is measured, then scaled to the
+  *visible* ledge. A fixed "shrink when crowded" rule can't work: a squarer window scales the art
+  up to cover the height and crops far more off the sides, leaving an iPad ~230pt of ledge while
+  its sprites are simultaneously *larger* (they key off `min(w,h)`) — the same trio overflows
+  there and leaves room to spare on a wide Mac.
+* **Enemy intent** — a small icon riding **above** each living enemy's own head showing what's
+  coming. Above rather than beside is what keeps it out of the *horizontal* budget: a badge is
+  wider than a small slime, so on a ledge this narrow a side-mounted one reached straight over
+  its neighbour. Icon and number sit **side by side**, not stacked — floating above the sprite a
+  tall badge runs into the HUD bars, and a phone leaves only ~30pt of clear air over a head.
+  It is lifted by a **fixed `0.60 ×` offset**, not an alignment guide: `overlay(alignment:)`
+  silently ignores custom alignment guides, which left the badge sitting on the sprite's face.
+  It's deliberately **coarse**: `EnemyIntent.Category` (attack / defend / debuff /
+  attack+defend / attack+debuff / defend+buff) picks the icon, title and one-line blurb, so
+  the player learns *that* a debuff is coming, never which one. **Only attacks show a
+  number**, and that number is the damage that will actually land — after the enemy's own
+  Strength and Weak (a Weakened 10 reads as **8**), via the same `StatusEffects.damageDealt`
+  combat uses, so the telegraph can't lie. Hold or hover for the blurb; the bubble floats
+  *above* the icon, lifted fully clear of the badge, and the whole enemy cluster is raised to
+  **zIndex 800** while it shows — the HUD bars (690) and the top-left block (700) are both drawn
+  after the arena and would otherwise paint over it. It is an **overlay**, anchored to the
+  sprite's leading edge — overlays don't take part in layout, so the sprites stay evenly spaced
+  along the ledge whatever the intent is.
+* **Target marking** — the selected enemy's **sprite glows gold** and its HUD bar, border and
+  name plate go gold with it; unselected enemies and bars stay plain. Tap a **sprite** to
+  retarget (bars are not tap targets); an AOE card being dragged marks *all* enemies. (A
+  floating ▼ used to do this, but once the intent badge moved above the head the two collided —
+  a phone has only ~30pt of air over an enemy to share.)
 * **Floating combat text:** damage numbers, gold **CRIT!**, blue **DODGE**, green **GUARD**,
   purple **poison**, green **heal** — so stat rolls are visible.
 * **Playing cards — drag-to-play, queued:**
@@ -43,6 +108,13 @@
     resolves plays one at a time — each parks in the center, holds, fades, then its effect +
     animation fire. So you can fire several cards without waiting on animations.
   * Each card hits the enemy you aimed at **when you played it**; hold a card for its tooltip.
+  * **`HandCardView` owns its own drag offset**, and this matters for frame rate. The offset was
+    once `@State` on `ContentView`, rewritten on every gesture callback — so each frame of every
+    drag invalidated the whole ~990-line combat body (background, HUD, sprites, bars, the rest of
+    the hand). Nothing outside the card ever read it. The parent is told only when a drag starts
+    and ends. **Any per-frame value belongs in the smallest view that reads it** — that body is
+    large enough that re-evaluating it at 60–120 Hz is the one reliable way to make this game
+    stutter.
   * **Tooltips show the numbers you'll actually get.** A card's rules text is built from
     clauses with the number split out, so a value your statuses have moved is recomputed and
     coloured — **red when a debuff shrank it** (Frail 1 turns Defend's "Gain 5 block" into a

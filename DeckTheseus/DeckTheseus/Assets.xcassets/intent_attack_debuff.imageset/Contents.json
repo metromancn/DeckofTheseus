@@ -1,0 +1,12 @@
+{
+  "images" : [
+    {
+      "filename" : "intent_attack_debuff.png",
+      "idiom" : "universal"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}

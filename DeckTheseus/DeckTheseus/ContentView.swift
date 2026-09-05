@@ -61,6 +61,11 @@ struct CroppedSprite: View {
     /// show (relic icons): layout still measures the content, but nothing is cut — the
     /// overspill is only the canvas's transparent padding.
     var clipToContent: Bool = true
+    /// How far the art's centre sits from the canvas centre, as a fraction of the canvas
+    /// (+ve = below). The crop box is centred, so art that isn't centred in its canvas
+    /// would otherwise render off its baseline — which is what made the Spiked Slime float
+    /// above the other slimes. Measured per asset.
+    var contentOffsetY: CGFloat = 0
 
     var body: some View {
         let full = targetH / contentH   // scale the whole canvas so content == targetH
@@ -68,6 +73,7 @@ struct CroppedSprite: View {
             .resizable()
             .interpolation(.none)
             .frame(width: full, height: full)
+            .offset(y: -full * contentOffsetY)   // re-centre the art inside the crop box
 
         if clipToContent {
             image
@@ -78,6 +84,63 @@ struct CroppedSprite: View {
                 .frame(width: full * contentW, height: targetH)  // same layout box, no clip
         }
     }
+}
+
+// MARK: - Arena Geometry
+//
+// `fight_background` is drawn with `contentMode: .fill`, so how the art lands on screen depends
+// on the window's shape: a Mac window scales it to the height and crops the sides, a phone in
+// landscape scales it to the width and crops top and bottom. The same painted floor therefore
+// sits at 0.62 of the height in one and 0.65 in the other. Anything that has to line up with
+// the scenery runs the same transform the image does instead of guessing a screen fraction.
+
+struct ArenaGeometry {
+    static let artW: CGFloat = 1536
+    static let artH: CGFloat = 864
+
+    /// Measured off the art: the top of the walkable stone on the two side ledges, and how far
+    /// each ledge runs. Both sides stand on this line, so they share a ground plane.
+    static let floorArtY: CGFloat = 538
+    static let leftLedgeArt: (CGFloat, CGFloat) = (0, 386)
+    static let rightLedgeArt: (CGFloat, CGFloat) = (1147, 1535)
+
+    let size: CGSize
+    /// What the system furniture eats into — the Dynamic Island in landscape, the home
+    /// indicator. The arena deliberately fills the whole window (the root `ignoresSafeArea`),
+    /// which is right for the *art* but puts anything at the screen edge under the island.
+    /// Combatants are kept inside these.
+    var safeInsets: EdgeInsets = EdgeInsets()
+
+    private var scale: CGFloat { max(size.width / Self.artW, size.height / Self.artH) }
+    private var originX: CGFloat { (size.width - Self.artW * scale) / 2 }
+    private var originY: CGFloat { (size.height - Self.artH * scale) / 2 }
+
+    func x(_ artX: CGFloat) -> CGFloat { originX + artX * scale }
+    func y(_ artY: CGFloat) -> CGFloat { originY + artY * scale }
+
+    /// Screen Y the combatants' feet rest on.
+    var floorY: CGFloat { y(Self.floorArtY) }
+
+    /// The stretch of a ledge actually on screen. How much survives the fill crop swings hard
+    /// with window shape — a squarer window scales the art up to cover the height and loses far
+    /// more off the sides, leaving an iPad barely 230pt of the right ledge where a wide Mac
+    /// window has 425pt. Anything standing on a ledge is sized against this rather than trusted
+    /// to fit.
+    func visibleSpan(_ span: (CGFloat, CGFloat)) -> (l: CGFloat, r: CGFloat) {
+        (max(safeInsets.leading, x(span.0)),
+         min(size.width - safeInsets.trailing, x(span.1)))
+    }
+
+    var rightLedge: (l: CGFloat, r: CGFloat) { visibleSpan(Self.rightLedgeArt) }
+
+    private func alongLedge(_ span: (CGFloat, CGFloat), _ f: CGFloat) -> CGFloat {
+        let s = visibleSpan(span)
+        return s.l + (s.r - s.l) * f
+    }
+
+    /// Biased inward from the screen edge so the knight clears the draw pile in the corner.
+    var playerX: CGFloat { alongLedge(Self.leftLedgeArt, 0.62) }
+    var enemyX: CGFloat { alongLedge(Self.rightLedgeArt, 0.5) }
 }
 
 // MARK: - Health Hearts (Pixel Art)
@@ -200,66 +263,303 @@ struct EnemyView: View {
     let spriteH: CGFloat      // visible sprite height
     let groundH: CGFloat      // shared ground-zone height (aligns with the player)
     let heartSize: CGFloat
-    let nameFont: CGFloat
-    let statGap: CGFloat
     let pulsing: Bool
-    let barWidth: CGFloat     // narrower when many enemies, to clear the player's stats
-    var onStatusTooltip: ((Bool) -> Void)? = nil
+    var onIntentTooltip: ((Bool) -> Void)? = nil
 
-    // Which status badge is being hovered/held (shows its description bubble).
+    @State private var showIntentInfo = false
 
+    /// The sprite and nothing else. Name, health, Block and statuses all live in this enemy's
+    /// HUD bar at the top of the screen, which is what frees the sprite to stand on the floor.
     var body: some View {
-        VStack(spacing: statGap) {
-            Text(enemy.name)
-                .font(.pixel(nameFont))
-                .foregroundColor(isTarget ? .goldBright : .textParchment)
-                .frame(height: nameFont * 1.3, alignment: .center)
-                .padding(.bottom, statGap)
+        ZStack(alignment: .bottom) {
+            // The shared ground zone: every enemy's feet land on its bottom edge however tall
+            // that enemy's own sprite is, so the whole line stands on the same stone.
+            Color.clear.frame(width: 1, height: groundH)
 
             ZStack(alignment: .top) {
                 CroppedSprite(name: enemy.spriteName,
                               contentW: enemy.spriteContentW,
                               contentH: enemy.spriteContentH,
-                              targetH: spriteH)
-                    .shadow(color: Color(hex: 0x32B45A).opacity(0.4), radius: 16)
+                              targetH: spriteH,
+                              contentOffsetY: enemy.spriteContentOffsetY)
+                    // Selected enemies burn gold — that glow and the matching gold on this
+                    // enemy's HUD bar are what pair a body with its bar.
+                    .shadow(color: isTarget ? Color.goldBright.opacity(0.9)
+                                            : Color(hex: 0x32B45A).opacity(0.4),
+                            radius: isTarget ? 18 : 16)
                     .scaleEffect(pulsing ? 1.03 : 1.0)
                     .animation(.easeInOut(duration: 1.75).repeatForever(autoreverses: true), value: pulsing)
                     .overlay { SpriteVFXView(vfx: enemy.vfx, size: spriteH * 0.9) }
                     .opacity(enemy.isAlive ? 1.0 : 0.25)
-                    .frame(height: groundH, alignment: .bottom)
-
-                // Target reticle above the sprite.
-                if isTarget {
-                    Text("\u{25BC}")
-                        .font(.system(size: heartSize * 0.55))
-                        .foregroundColor(.goldBright)
-                        .shadow(color: Color.goldBright.opacity(0.8), radius: 6)
-                        .offset(y: -heartSize * 0.35)
-                }
 
                 // Floating combat text (damage / CRIT).
                 CombatFlashView(flash: enemy.combatFlash, fontSize: heartSize * 0.42)
                     .offset(y: -spriteH * 0.35)
             }
-
-            VStack(spacing: heartSize * 0.06) {
-                HStack(spacing: 4) {
-                    HealthBarView(currentHp: enemy.currentHp, maxHp: enemy.maxHp,
-                                  width: barWidth, height: heartSize * 0.42)
-                    ShieldView(block: enemy.currentBlock, size: heartSize * 0.30)
+            // Intent rides directly above this enemy's own head — measured off the sprite, not
+            // the shared ground zone, so a short slime doesn't strand it in mid-air. Sitting
+            // above rather than beside is what keeps it out of the horizontal budget: the ledge
+            // only has to fit sprites, and a badge can no longer reach over its neighbour.
+            .overlay(alignment: .top) {
+                if enemy.isAlive {
+                    // Lifted clear by its own height (icon ≈ 0.28, text ≈ 0.34, padding 0.14)
+                    // plus a gap. A `d[.bottom]` alignment guide would express this better, but
+                    // `overlay(alignment:)` doesn't apply custom guides — it silently ignored
+                    // them and left the badge sitting on the sprite's face.
+                    intentBadge.offset(y: -heartSize * 0.60)
                 }
-
-                // Status row below the bar (no overlap with the numeric bar).
-                // Hover / hold a badge to see what it does (and what its number means).
-                StatusRowView(status: enemy.status, isPlayer: false,
-                              scale: heartSize, tooltipWidth: max(barWidth * 1.5, heartSize * 3.0),
-                              rowWidth: barWidth,
-                              // Bars narrow when 3+ enemies share the arena — one badge
-                              // per line then, so nothing overhangs its own column.
-                              maxPerRow: barWidth < heartSize * 1.7 ? 1 : 2,
-                              onTooltipChange: { onStatusTooltip?($0) })
             }
         }
+        // The HUD bars are drawn after the arena, so they would paint over the intent bubble.
+        // Lift this enemy while it shows; the cluster raises itself to match.
+        .zIndex(showIntentInfo ? 10 : 0)
+    }
+
+    /// Small icon plus the number the move will ACTUALLY produce — damage after the
+    /// enemy's Strength/Weak, Block after its Frail. Hold or hover to read what it means.
+    @ViewBuilder
+    private var intentBadge: some View {
+        let move = enemy.nextMove
+
+        // Icon and number side by side rather than stacked. Floating above the sprite a tall
+        // badge runs straight into the HUD bars — an enemy's head has only about 30pt of clear
+        // air above it on a phone — and only attacks carry a number anyway.
+        HStack(spacing: heartSize * 0.05) {
+            CroppedSprite(name: move.category.iconName,
+                          contentW: move.category.iconContent.w,
+                          contentH: move.category.iconContent.h,
+                          targetH: heartSize * 0.28,
+                          clipToContent: false)
+
+            if let value = move.displayValue(for: enemy.status) {
+                Text(value)
+                    .font(.pixel(heartSize * 0.28))
+                    .foregroundColor(.textParchment)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .shadow(color: .black.opacity(0.9), radius: 2)
+            }
+        }
+        // Padding first, so the tappable area is comfortably bigger than the small icon.
+        .padding(heartSize * 0.07)
+        .contentShape(Rectangle())
+        .onHover { showIntentInfo = $0; onIntentTooltip?($0) }
+        .onLongPressGesture(minimumDuration: 0.3, pressing: {
+            showIntentInfo = $0; onIntentTooltip?($0)
+        }, perform: {})
+        // Anchored to the badge's trailing edge, so it opens leftward into the empty middle of
+        // the arena. Centred on the badge it would run off the screen for the rightmost enemy,
+        // whose sprite sits within a badge's width of the edge.
+        .overlay(alignment: .bottomTrailing) {
+            if showIntentInfo {
+                VStack(spacing: 3) {
+                    Text(move.category.title)
+                        .font(.pixel(heartSize * 0.26))
+                        .foregroundColor(.goldBright)
+                    Text(move.category.blurb)
+                        .font(.pixel(heartSize * 0.22))
+                        .foregroundColor(.textParchment)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 9).padding(.vertical, 7)
+                .frame(width: heartSize * 3.4)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color(hex: 0x140E20)))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.goldBorder, lineWidth: 1.5))
+                .shadow(color: .black.opacity(0.5), radius: 8)
+                // Lift it fully clear of the badge (icon + number + padding ≈ 0.9),
+                // so it floats above the intent without reaching the name.
+                .offset(y: -(heartSize * 1.02))
+                .allowsHitTesting(false)
+            }
+        }
+    }
+}
+
+// MARK: - Hand Card
+//
+// One card in the hand, fanned into place and draggable up into the play zone.
+//
+// It owns its drag offset. That offset used to be `@State` on ContentView, rewritten on every
+// gesture callback — 60–120 times a second — and because SwiftUI invalidates a view whose state
+// changes, every frame of every drag re-evaluated the whole ~990-line combat body: background,
+// HUD, sprites, bars, the rest of the hand, all of it. Nothing outside this card ever read the
+// offset. Keeping it here means a drag redraws one card.
+
+private struct HandCardView: View {
+    let card: Card
+    let isDealt: Bool
+    let isRevealed: Bool
+    let isSelected: Bool
+    let isAffordable: Bool
+    let showTooltip: Bool
+    let ownerStatus: StatusEffects
+    let cardW: CGFloat
+    let cardH: CGFloat
+    let fanX: Double
+    let fanY: Double
+    let fanAngle: Double
+    let startX: Double
+    let playThreshold: CGFloat
+    let handCount: Int
+    /// Whether a drag may start at all — energy, turn and resolution state, decided by the
+    /// parent once per layout pass rather than re-checked on every gesture callback.
+    let canDrag: Bool
+    let onTap: () -> Void
+    let onDragBegan: () -> Void
+    /// `true` when the card was released high enough to play it.
+    let onDragEnded: (Bool) -> Void
+    let onLongPress: (Bool) -> Void
+
+    @State private var dragOffset: CGSize = .zero
+    @State private var isDragging = false
+
+    var body: some View {
+        // Lifted high enough that letting go will play it.
+        let inPlayZone = isDragging && dragOffset.height < -playThreshold
+        let currentX = (isDealt ? fanX : startX) + Double(dragOffset.width)
+        let currentY = (isDealt ? fanY : 0) + (isSelected ? -cardH * 0.15 : 0) + Double(dragOffset.height)
+        // Straighten the card while it's being dragged.
+        let currentAngle = isDragging ? 0 : (isDealt ? fanAngle : 0)
+
+        Group {
+            if isRevealed {
+                CardView(card: card,
+                         isSelected: isSelected,
+                         // During the enemy's turn, dim every card exactly like an
+                         // unplayable (not enough energy) card.
+                         isAffordable: isAffordable,
+                         showTooltip: showTooltip,
+                         cardWidth: cardW,
+                         cardHeight: cardH,
+                         ownerStatus: ownerStatus)
+            } else {
+                FaceDownCard(width: cardW, height: cardH)
+            }
+        }
+        .contentShape(Rectangle())
+        .scaleEffect(inPlayZone ? 1.06 : 1.0)   // "ready to play" cue
+        .offset(x: currentX, y: currentY)
+        .rotationEffect(.degrees(currentAngle), anchor: .bottom)
+        // Tap toggles selection (multi-select — floats the card up).
+        .onTapGesture(perform: onTap)
+        // Drag it up into the middle and release to play it (one at a time).
+        .gesture(
+            DragGesture(minimumDistance: 6)
+                .onChanged { value in
+                    guard canDrag else { return }
+                    if !isDragging {
+                        isDragging = true
+                        onDragBegan()
+                    }
+                    dragOffset = value.translation
+                }
+                .onEnded { value in
+                    guard isDragging else { return }
+                    let playIt = value.translation.height < -playThreshold
+                    if playIt {
+                        isDragging = false
+                        dragOffset = .zero
+                    } else {
+                        // Not far enough — ease back into the fan. Both the offset and the
+                        // straightened angle have to unwind inside the animation, or the card
+                        // simply teleports home.
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            isDragging = false
+                            dragOffset = .zero
+                        }
+                    }
+                    onDragEnded(playIt)
+                }
+        )
+        .onLongPressGesture(minimumDuration: 0.3, pressing: onLongPress, perform: {})
+        .animation(.easeOut(duration: 0.15), value: isSelected)
+        .animation(.easeInOut(duration: 0.3), value: handCount)
+    }
+}
+
+// MARK: - Combatant HUD Bar
+//
+// The fighting-game layout: every combatant's name plate, health, Block and statuses sit in a
+// fixed slot along the top of the screen — the player on the left, enemies stacked on the
+// right — rather than hanging off the sprite. Detaching them is what lets the sprites stand on
+// the painted floor with nothing above or below them, and it puts the four bars of a crowded
+// fight somewhere they actually fit: the right-hand ledge is only about 275pt wide on a Mac
+// window, which three full-width bars overrun twice over.
+
+struct CombatantBarView: View {
+    let name: String
+    let currentHp: Int
+    let maxHp: Int
+    let block: Int
+    let status: StatusEffects
+    let isPlayer: Bool
+    /// Whether this is the enemy the player has selected. Only the selected bar lights up; the
+    /// rest sit plain, so the gold pairs this bar with the body glowing gold down in the arena.
+    let isTarget: Bool
+    let barWidth: CGFloat
+    let scale: CGFloat        // heartSize
+    let nameFont: CGFloat
+
+    // Slim, the way a fighting game's bars are. At the sprite-attached thickness three stacked
+    // rows made a solid block that crowded down onto the enemies themselves.
+    private var barH: CGFloat { scale * 0.32 }
+
+    var body: some View {
+        VStack(alignment: isPlayer ? .leading : .trailing, spacing: barH * 0.12) {
+            namePlate
+
+            // Enemy rows mirror the player's, so the bar always hugs its own screen edge and
+            // the statuses trail off toward the middle.
+            HStack(spacing: barH * 0.24) {
+                if isPlayer {
+                    healthBar
+                    ShieldView(block: block, size: scale * 0.30)
+                    statuses
+                } else {
+                    statuses
+                    ShieldView(block: block, size: scale * 0.30)
+                    healthBar
+                }
+            }
+        }
+    }
+
+    private var namePlate: some View {
+        Text(name.uppercased())
+            .font(.pixel(nameFont))
+            .foregroundColor(isTarget ? .goldBright : .textParchment)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, barH * 0.26)
+            .padding(.vertical, barH * 0.05)
+            .background(RoundedRectangle(cornerRadius: barH * 0.18).fill(Color(hex: 0x140E20).opacity(0.88)))
+            .overlay(RoundedRectangle(cornerRadius: barH * 0.18)
+                .stroke(isTarget ? Color.goldBright : Color.goldBorder, lineWidth: 1.2))
+    }
+
+    private var healthBar: some View {
+        HealthBarView(currentHp: currentHp, maxHp: maxHp, width: barWidth, height: barH)
+            .overlay(RoundedRectangle(cornerRadius: barH * 0.28)
+                .stroke(isTarget ? Color.goldBright : Color.goldBorder,
+                        lineWidth: isTarget ? 2.5 : 1.5))
+            .shadow(color: isTarget ? Color.goldBright.opacity(0.65) : .clear, radius: 6)
+    }
+
+    private var statuses: some View {
+        // The player's badges may wrap onto a second line — its bar is the last thing in the
+        // top-left stack, so there is nothing underneath to disturb. Enemy rows stack on each
+        // other, so theirs stay on one line and reach further leftward instead; keeping their
+        // height fixed is what stops a heavily-statused fight from growing the band down over
+        // the sprites.
+        //
+        // Badges run a little smaller than they did beneath a sprite: at full size a fully
+        // statused player and a fully statused enemy reach far enough across the top of the
+        // screen to meet in the middle.
+        StatusRowView(status: status, isPlayer: isPlayer,
+                      scale: scale * 0.82, tooltipWidth: max(barWidth * 1.05, scale * 3.4),
+                      maxPerRow: isPlayer ? 2 : 3,
+                      tooltipBelow: true)
     }
 }
 
@@ -277,6 +577,9 @@ struct StatusRowView: View {
     /// the column and nudge the sprite sideways. Extra badges wrap onto further rows.
     var rowWidth: CGFloat? = nil
     var maxPerRow: Int = 2
+    /// Docked at the top of the screen a badge has no room above it, so its bubble drops
+    /// below instead of floating over.
+    var tooltipBelow: Bool = false
     /// Fires when the description bubble opens or closes. A tooltip drawn inside one
     /// combatant's column is painted over by the next one, so whoever owns it has to be
     /// raised above its siblings while it shows.
@@ -336,10 +639,10 @@ struct StatusRowView: View {
             }
             .frame(width: rowWidth)   // nil = size to content
             .onChange(of: hovered) { _, new in onTooltipChange?(new != nil) }
-            .overlay(alignment: .bottom) {
+            .overlay(alignment: tooltipBelow ? .top : .bottom) {
                 if let key = hovered, let info = info(key) {
                     tooltip(info)
-                        .offset(y: -(scale * 0.55))
+                        .offset(y: tooltipBelow ? scale * 0.55 : -(scale * 0.55))
                         .allowsHitTesting(false)
                 }
             }
@@ -501,7 +804,6 @@ struct ContentView: View {
 
     // Drag-to-play: which hand card is being dragged, and its live drag offset.
     @State private var draggingCardId: UUID? = nil
-    @State private var cardDragOffset: CGSize = .zero
     // Queued plays: a played card leaves the hand instantly and its effect resolves later
     // (in order, each with its center-hold), so the player can fire off cards without waiting.
     @State private var pendingPlays: [QueuedPlay] = []
@@ -554,21 +856,52 @@ struct ContentView: View {
             let orbSize = max(unit * 0.09, 50.0)
             let handWidth = geo.size.width * 0.52
 
-            // Sprite layout (equal margins from each screen edge, both on same level)
-            let sideMargin = geo.size.width * 0.10         // more inward from the edges
+            // Sprite layout — both sides stand on the ledges painted into the background, so
+            // the ground line comes from the art's own geometry rather than a screen fraction.
+            let arena = ArenaGeometry(size: geo.size, safeInsets: geo.safeAreaInsets)
             let bossSpriteH = min(unit * 0.20, 175.0)      // boss a bit bigger
             let playerSpriteH = bossSpriteH * 0.78         // player smaller than boss
-            let spriteTopPad = geo.size.height * 0.25      // sit low in the arena
-            let statGap = heartSize * 0.14   // sprite→hearts (compact)
+            // The enemy line is scaled to the stone it actually has to stand on. A fixed
+            // "shrink when crowded" rule can't work: the visible ledge is 275pt on this Mac
+            // window but only 230pt on an iPad, where the sprites are simultaneously *larger*
+            // (they key off min(w,h)) — so the same trio overflows on one device and leaves
+            // room to spare on another. Measure, then fit.
+            let enemyLineW = engine.enemies.reduce(CGFloat(0)) {
+                $0 + bossSpriteH * $1.spriteScale * ($1.spriteContentW / $1.spriteContentH)
+            } + heartSize * 0.18 * CGFloat(max(0, engine.enemies.count - 1))
+            let ledge = arena.rightLedge
+            // The 0.92 leaves a margin at both ends of the stone: each sprite's intent badge
+            // floats above it and is wider than a small slime, so the outermost badges need
+            // somewhere to overhang that isn't off the ledge — or, on an iPad where the ledge
+            // runs right up to the window edge, off the screen.
+            let enemyFit: CGFloat = enemyLineW > 0
+                ? min(1, (ledge.r - ledge.l) * 0.92 / enemyLineW)
+                : 1
+            // Enemies present means a fight is on — the only time the combat bars belong.
+            let inCombat = !engine.enemies.isEmpty
+            let hudBarW = min(geo.size.width * 0.22, 340.0)
 
             ZStack {
                 // Background — fill screen, slight crop OK
-                Image("battle_background")
+                Image("fight_background")
                     .resizable()
                     .interpolation(.none)
                     .aspectRatio(contentMode: .fill)
                     .frame(width: geo.size.width, height: geo.size.height)
                     .clipped()
+
+                // The art is bright enough to swallow the sprites, their intent icons and the
+                // HUD text, so knock it back and darken the corners where the HUD and the hand
+                // of cards sit. One layer over the background changes nothing else on screen.
+                //
+                // A flat scrim *and* a vignette on top of it would composite the full screen
+                // twice every frame; the two fold into a single gradient — 0.34 at the centre
+                // is what the flat layer gave, 0.67 at the edge is what the pair composited to.
+                RadialGradient(colors: [Color.black.opacity(0.34), Color.black.opacity(0.67)],
+                               center: .center,
+                               startRadius: unit * 0.30, endRadius: unit * 1.05)
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .allowsHitTesting(false)
 
                 // Top bar: Floor-Act + Turn + Gold (left), dev SKIP (right)
                 VStack(alignment: .leading, spacing: 6) {
@@ -600,59 +933,86 @@ struct ContentView: View {
                                 .stroke((n > 0 ? Color.goldBright : Color.goldBorder).opacity(0.7), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
+
+                    // The player's bar rides at the bottom of this stack rather than in a
+                    // container of its own: that way it always clears the gold row however
+                    // many relics have widened it, with nothing to measure by hand.
+                    if inCombat {
+                        CombatantBarView(
+                            name: "Player",
+                            currentHp: engine.player.currentHp,
+                            maxHp: engine.player.maxHp,
+                            block: engine.displayPlayerBlock,
+                            status: engine.player.status,
+                            isPlayer: true,
+                            isTarget: false,
+                            barWidth: hudBarW,
+                            scale: heartSize,
+                            nameFont: nameFont
+                        )
+                        .padding(.top, heartSize * 0.10)
+                    }
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 12)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .zIndex(700)   // keep the HUD (and relic tooltips) above the arena
 
-                // Player (LEFT) — compact: name, sprite, hearts+shield all adjacent, left-aligned
-                VStack(alignment: .leading, spacing: statGap) {
-                    Text("Player")
-                        .font(.pixel(nameFont))
-                        .foregroundColor(.textParchment)
-                        .frame(height: nameFont * 1.3, alignment: .center)
-                        .padding(.bottom, statGap)
-
-                    CroppedSprite(name: "player_sprite", contentW: 0.33, contentH: 0.4375, targetH: playerSpriteH)
-                        .shadow(color: Color(hex: 0xA07830).opacity(0.3), radius: 12)
-                        .scaleEffect(playerPulsing ? 1.02 : 1.0)
-                        .animation(
-                            .easeInOut(duration: 2.0).repeatForever(autoreverses: true),
-                            value: playerPulsing
-                        )
-                        .overlay {
-                            SpriteVFXView(vfx: engine.playerVFX, size: playerSpriteH * 0.9)
+                // Enemy bars, stacked under the Gem/gear cluster. Deliberately outside that
+                // cluster's visibility condition — these belong to the fight, not to the
+                // persistent HUD, so they come and go with the enemies instead.
+                if inCombat {
+                    VStack(alignment: .trailing, spacing: heartSize * 0.13) {
+                        ForEach(Array(engine.enemies.enumerated()), id: \.element.id) { index, enemy in
+                            if enemy.isAlive {
+                                CombatantBarView(
+                                    name: enemy.name,
+                                    currentHp: enemy.currentHp,
+                                    maxHp: enemy.maxHp,
+                                    block: enemy.currentBlock,
+                                    status: enemy.status,
+                                    isPlayer: false,
+                                    isTarget: index == engine.targetIndex,
+                                    barWidth: hudBarW,
+                                    scale: heartSize,
+                                    nameFont: nameFont
+                                )
+                            }
                         }
-                        .overlay(alignment: .top) {
-                            CombatFlashView(flash: engine.player.combatFlash, fontSize: heartSize * 0.42)
-                                .offset(y: -playerSpriteH * 0.2)
-                        }
-                        .frame(height: bossSpriteH, alignment: .bottom)   // stand on the same ground as the boss
-
-                    VStack(alignment: .leading, spacing: heartSize * 0.06) {
-                        HStack(spacing: 4) {
-                            HealthBarView(currentHp: engine.player.currentHp, maxHp: engine.player.maxHp,
-                                          width: heartSize * 1.9, height: heartSize * 0.42)
-
-                            ShieldView(block: engine.displayPlayerBlock, size: heartSize * 0.30)
-                        }
-
-                        // Statuses are universal — the player shows the same badges as enemies.
-                        StatusRowView(status: engine.player.status, isPlayer: true,
-                                      scale: heartSize, tooltipWidth: heartSize * 3.0,
-                                      rowWidth: heartSize * 1.9)
                     }
+                    .padding(.trailing, 20 + geo.safeAreaInsets.trailing)
+                    // Clear of the Gem/gear cluster: its own 32pt top pad plus the gear button
+                    // (glyph + 9pt padding each side), then a breath.
+                    .padding(.top, 32 + titleFont * 1.05 + 18 + heartSize * 0.10)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .zIndex(690)
                 }
-                .padding(.top, spriteTopPad)
-                .padding(.leading, sideMargin)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .zIndex(5)   // player stats draw above the enemy cluster if they ever meet
 
-                // Enemies (RIGHT) — one or more; tap a sprite to target it.
-                // Each enemy's display size comes from its own spriteScale so it's
-                // consistent across every floor it appears on. Tight spacing keeps the
-                // group clustered on the right, out of the player's side of the arena.
+                // Player (LEFT) — the sprite alone, standing on the left ledge. Everything that
+                // used to hang beneath it now lives in the HUD bar top-left.
+                CroppedSprite(name: "player_sprite", contentW: 0.33, contentH: 0.4375, targetH: playerSpriteH)
+                    .shadow(color: Color(hex: 0xA07830).opacity(0.3), radius: 12)
+                    .scaleEffect(playerPulsing ? 1.02 : 1.0)
+                    .animation(
+                        .easeInOut(duration: 2.0).repeatForever(autoreverses: true),
+                        value: playerPulsing
+                    )
+                    .overlay {
+                        SpriteVFXView(vfx: engine.playerVFX, size: playerSpriteH * 0.9)
+                    }
+                    .overlay(alignment: .top) {
+                        CombatFlashView(flash: engine.player.combatFlash, fontSize: heartSize * 0.42)
+                            .offset(y: -playerSpriteH * 0.2)
+                    }
+                    // Placed by its feet: centred on the left ledge, bottom edge on the floor.
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .offset(x: arena.playerX - geo.size.width / 2,
+                            y: arena.floorY - playerSpriteH)
+                    .zIndex(5)   // the player draws above the enemy cluster if they ever meet
+
+                // Enemies (RIGHT) — one or more, shoulder to shoulder on the right ledge; tap a
+                // sprite (or its bar) to target it. Each enemy's display size comes from its own
+                // spriteScale so it's consistent across every floor it appears on.
                 // Dragging or resolving an AOE card (Cleave) marks every living enemy;
                 // otherwise only the single current target is reticled.
                 let draggedCardIsAOE: Bool = {
@@ -661,22 +1021,16 @@ struct ContentView: View {
                           let c = engine.deck.hand.first(where: { $0.id == id }) else { return false }
                     return c.hitsAllEnemies && c.damage > 0
                 }()
-                // Narrow the enemy bars when the cluster is crowded so it stays on the
-                // right and doesn't reach into the player's health/shield.
-                let enemyBarW = heartSize * (engine.enemies.count >= 3 ? 1.45 : 1.9)
-                HStack(alignment: .top, spacing: heartSize * 0.1) {
+                HStack(alignment: .bottom, spacing: heartSize * 0.18) {
                     ForEach(Array(engine.enemies.enumerated()), id: \.element.id) { index, enemy in
                         EnemyView(
                             enemy: enemy,
                             isTarget: draggedCardIsAOE ? enemy.isAlive : index == engine.targetIndex,
-                            spriteH: bossSpriteH * enemy.spriteScale,
+                            spriteH: bossSpriteH * enemy.spriteScale * enemyFit,
                             groundH: bossSpriteH,
                             heartSize: heartSize,
-                            nameFont: nameFont,
-                            statGap: statGap,
                             pulsing: enemyPulsing,
-                            barWidth: enemyBarW,
-                            onStatusTooltip: { showing in
+                            onIntentTooltip: { showing in
                                 statusTooltipEnemyId = showing ? enemy.id : nil
                             }
                         )
@@ -690,12 +1044,14 @@ struct ContentView: View {
                         }
                     }
                 }
-                .padding(.top, spriteTopPad)
-                .padding(.trailing, sideMargin)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                // Lift the whole cluster over the player's column (zIndex 5) while a
-                // status description is open, so the bubble is never painted under it.
-                .zIndex(statusTooltipEnemyId != nil ? 20 : 0)
+                // Placed by their feet: the group centred on the right ledge, the shared ground
+                // zone's bottom edge on the floor line.
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .offset(x: arena.enemyX - geo.size.width / 2,
+                        y: arena.floorY - bossSpriteH)
+                // An open intent bubble has to clear the HUD bars (690) and the top-left
+                // block (700), both of which are drawn after the arena.
+                .zIndex(statusTooltipEnemyId != nil ? 800 : 0)
 
                 // Bottom-LEFT: Draw pile with count right above
                 VStack(spacing: 1) {
@@ -761,88 +1117,52 @@ struct ContentView: View {
                         let fanX = t * Double(handWidth) * 0.42 * spreadScale
                         let fanY = abs(t) * 8.0 * spreadScale
 
-                        let isDealt = dealtCardIds.contains(card.id)
-                        let isRevealed = revealedCardIds.contains(card.id)
                         let isSelected = engine.selectedCardIds.contains(card.id)
-                        let isDragging = draggingCardId == card.id
-                        // Card is lifted high enough that releasing will play it.
-                        let inPlayZone = isDragging && cardDragOffset.height < -playThreshold
 
-                        let startX = Double(-handWidth) * 0.55
-                        let dragX = isDragging ? Double(cardDragOffset.width) : 0
-                        let dragY = isDragging ? Double(cardDragOffset.height) : 0
-                        let currentX = (isDealt ? fanX : startX) + dragX
-                        let currentY = (isDealt ? fanY : 0) + (isSelected ? -cardH * 0.15 : 0) + dragY
-                        // Straighten the card while it's being dragged.
-                        let currentAngle = isDragging ? 0 : (isDealt ? fanAngle : 0)
-
-                        Group {
-                            if isRevealed {
-                                CardView(
-                                    card: card,
-                                    isSelected: isSelected,
-                                    // During the enemy's turn, dim every card exactly like
-                                    // an unplayable (not enough energy) card.
-                                    isAffordable: engine.canAfford(card) && !isEnemyTurn,
-                                    showTooltip: tooltipCardId == card.id,
-                                    cardWidth: cardW,
-                                    cardHeight: cardH,
-                                    ownerStatus: engine.player.status
-                                )
-                            } else {
-                                FaceDownCard(width: cardW, height: cardH)
+                        HandCardView(
+                            card: card,
+                            isDealt: dealtCardIds.contains(card.id),
+                            isRevealed: revealedCardIds.contains(card.id),
+                            isSelected: isSelected,
+                            isAffordable: engine.canAfford(card) && !isEnemyTurn,
+                            showTooltip: tooltipCardId == card.id,
+                            ownerStatus: engine.player.status,
+                            cardW: cardW, cardH: cardH,
+                            fanX: fanX, fanY: fanY, fanAngle: fanAngle,
+                            startX: Double(-handWidth) * 0.55,
+                            playThreshold: playThreshold,
+                            handCount: count,
+                            // Evaluated once per body pass, not per drag frame.
+                            canDrag: !engine.isResolvingTurn && !isEnemyTurn
+                                && engine.gameState == .playing && engine.canAfford(card),
+                            onTap: {
+                                withAnimation(.easeOut(duration: 0.15)) { engine.toggleSelect(card.id) }
+                            },
+                            onDragBegan: {
+                                draggingCardId = card.id
+                                engine.selectCard(card.id)   // highlight while dragging
+                                tooltipCardId = nil
+                            },
+                            onDragEnded: { playIt in
+                                draggingCardId = nil
+                                // Commit + queue instantly — the card leaves the hand now;
+                                // its effect resolves in the play queue.
+                                if playIt, engine.canAfford(card) { playCardNow(card) }
+                            },
+                            onLongPress: { pressing in
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    tooltipCardId = pressing ? card.id : nil
+                                }
                             }
-                        }
-                        .contentShape(Rectangle())
-                        .scaleEffect(inPlayZone ? 1.06 : 1.0)   // "ready to play" cue
-                        .offset(x: currentX, y: currentY)
-                        .rotationEffect(.degrees(currentAngle), anchor: .bottom)
+                        )
                         .zIndex(
-                            isDragging ? 500 :
+                            draggingCardId == card.id ? 500 :
                             tooltipCardId == card.id ? 200 :
                             isSelected ? 100 + Double(index) :
                             Double(index)
                         )
-                        .allowsHitTesting(isRevealed && !engine.isResolvingTurn && !isEnemyTurn)
-                        // Tap toggles selection (multi-select — floats the card up).
-                        .onTapGesture {
-                            withAnimation(.easeOut(duration: 0.15)) { engine.toggleSelect(card.id) }
-                        }
-                        // Drag it up into the middle and release to play it (one at a time).
-                        .gesture(
-                            DragGesture(minimumDistance: 6)
-                                .onChanged { value in
-                                    guard !engine.isResolvingTurn, !isEnemyTurn,
-                                          engine.gameState == .playing, engine.canAfford(card) else { return }
-                                    if draggingCardId != card.id {
-                                        draggingCardId = card.id
-                                        engine.selectCard(card.id)   // highlight while dragging
-                                        tooltipCardId = nil
-                                    }
-                                    cardDragOffset = value.translation
-                                }
-                                .onEnded { value in
-                                    guard draggingCardId == card.id else { return }
-                                    let releasedInPlayZone = value.translation.height < -playThreshold
-                                    draggingCardId = nil
-                                    cardDragOffset = .zero
-                                    if releasedInPlayZone && engine.canAfford(card) {
-                                        // Commit + queue instantly — the card leaves the hand
-                                        // now; its effect resolves in the play queue.
-                                        playCardNow(card)
-                                    } else {
-                                        // Not far enough — snap back to the hand.
-                                        withAnimation(.easeOut(duration: 0.2)) { cardDragOffset = .zero }
-                                    }
-                                }
-                        )
-                        .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                tooltipCardId = pressing ? card.id : nil
-                            }
-                        }, perform: {})
-                        .animation(.easeOut(duration: 0.15), value: isSelected)
-                        .animation(.easeInOut(duration: 0.3), value: count)
+                        .allowsHitTesting(revealedCardIds.contains(card.id)
+                                          && !engine.isResolvingTurn && !isEnemyTurn)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
@@ -1097,7 +1417,7 @@ struct ContentView: View {
                 // Gems can be bought without having to die first) and the Settings gear
                 // (in-run only). Hidden behind a dialogue scene, the gem shop and settings,
                 // which own the screen while they're up.
-                if activeScene == nil && !showGemShop && !showSettings {
+                if activeScene == nil && !showGemShop && !showSettings && !showCharacter {
                     HStack(spacing: 12) {
                         GemBarView(balance: gemBalance, size: titleFont) {
                             showGemShop = true
@@ -1251,7 +1571,6 @@ struct ContentView: View {
         resolvingCard = nil
         resolvingCardOpacity = 1.0
         draggingCardId = nil
-        cardDragOffset = .zero
         engine.isResolvingTurn = false
         engine.selectedCardIds.removeAll()
         showCharacter = false

@@ -356,14 +356,85 @@ enum EnemyIntent {
         }
     }
 
-    func displayValue(strength: Int) -> String {
+    /// What the player is told is coming. Deliberately COARSE — the icon and blurb say
+    /// "a debuff is coming", never which one. Only the damage number is exact.
+    enum Category {
+        case attack, defend, debuff, attackDefend, attackDebuff, defendBuff
+
+        var iconName: String {
+            switch self {
+            case .attack:        return "intent_attack"
+            case .defend:        return "intent_defend"
+            case .debuff:        return "intent_debuff"
+            case .attackDefend:  return "intent_attack_defend"
+            case .attackDebuff:  return "intent_attack_debuff"
+            case .defendBuff:    return "intent_defend_buff"
+            }
+        }
+
+        /// Where the art sits inside its 64px canvas, so every icon renders the same size.
+        var iconContent: (w: CGFloat, h: CGFloat) {
+            switch self {
+            case .attack:       return (0.266, 0.281)
+            case .defend:       return (0.234, 0.297)
+            case .debuff:       return (0.250, 0.203)
+            case .attackDefend: return (0.266, 0.297)
+            case .attackDebuff: return (0.359, 0.297)
+            case .defendBuff:   return (0.266, 0.344)
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .attack:       return "Attack"
+            case .defend:       return "Defend"
+            case .debuff:       return "Debuff"
+            case .attackDefend: return "Attack & Defend"
+            case .attackDebuff: return "Attack & Debuff"
+            case .defendBuff:   return "Defend & Buff"
+            }
+        }
+
+        var blurb: String {
+            switch self {
+            case .attack:       return "It's going to attack you."
+            case .defend:       return "It's going to brace itself and gain Block."
+            case .debuff:       return "It's going to inflict a debuff on you."
+            case .attackDefend: return "It's going to attack you and gain Block."
+            case .attackDebuff: return "It's going to attack you and inflict a debuff."
+            case .defendBuff:   return "It's going to gain Block and buff itself."
+            }
+        }
+
+        /// Only attacks put a number on screen — everything else stays vague on purpose.
+        var showsValue: Bool {
+            switch self {
+            case .attack, .attackDefend, .attackDebuff: return true
+            case .defend, .debuff, .defendBuff:         return false
+            }
+        }
+    }
+
+    var category: Category {
         switch self {
-        case .tackle(let base): return "\(base + strength)"
-        case .gooSpit(let count, _): return "×\(count)"
-        case .harden(let blk, _, _): return "\(blk)"
-        case .defend(let blk): return "\(blk)"
-        case .attackDefend(let dmg, _): return "\(dmg + strength)"
-        case .corrode(let dmg, _): return "\(dmg + strength)"
+        case .tackle:       return .attack
+        case .defend:       return .defend
+        case .gooSpit:      return .debuff
+        case .harden:       return .defendBuff
+        case .attackDefend: return .attackDefend
+        case .corrode:      return .attackDebuff
+        }
+    }
+
+    /// The incoming damage, after this enemy's own Strength and Weak — so the telegraph
+    /// matches what will actually land. Nil for non-attacks, which show no number.
+    func displayValue(for status: StatusEffects) -> String? {
+        guard category.showsValue else { return nil }
+        switch self {
+        case .tackle(let base):         return "\(status.damageDealt(base))"
+        case .attackDefend(let dmg, _): return "\(status.damageDealt(dmg))"
+        case .corrode(let dmg, _):      return "\(status.damageDealt(dmg))"
+        default:                        return nil
         }
     }
 }
@@ -583,6 +654,9 @@ class Enemy: Identifiable {
     var spriteName: String
     var spriteContentW: CGFloat
     var spriteContentH: CGFloat
+    /// Art centre vs canvas centre (+ve = below), so every sprite stands on the same
+    /// ground line however tall its art is. Measured from the asset.
+    var spriteContentOffsetY: CGFloat = 0
     var spriteScale: CGFloat   // display size relative to the boss sprite height
 
     // Repeating list of moves; advanceIntent walks through it by turn number.
@@ -601,8 +675,10 @@ class Enemy: Identifiable {
     init(name: String, maxHp: Int, spriteName: String,
          spriteContentW: CGFloat, spriteContentH: CGFloat, rotation: [EnemyIntent],
          spriteScale: CGFloat = 1.0, dropsRelic: Relic? = nil, goldReward: Int = 15,
-         guaranteedEquipmentDrops: Int = 0, stats: [StatKind: Int] = [:]) {
+         guaranteedEquipmentDrops: Int = 0, spriteContentOffsetY: CGFloat = 0,
+         stats: [StatKind: Int] = [:]) {
         self.stats = stats
+        self.spriteContentOffsetY = spriteContentOffsetY
         self.name = name
         self.maxHp = maxHp
         self.currentHp = maxHp
@@ -648,7 +724,7 @@ class Enemy: Identifiable {
         Enemy(name: "Slime", maxHp: 30, spriteName: "enemy_slime_basic",
               spriteContentW: 0.453, spriteContentH: 0.375,
               rotation: [.tackle(baseDamage: 5)],
-              spriteScale: 0.5,
+              spriteScale: 0.5, spriteContentOffsetY: 0.0156,
               stats: [:])   // the tutorial enemy: baseline reflexes only
     }
 
@@ -657,7 +733,7 @@ class Enemy: Identifiable {
         Enemy(name: "Red Slime", maxHp: 20, spriteName: "enemy_red_slime_basic",
               spriteContentW: 0.453, spriteContentH: 0.375,
               rotation: [.tackle(baseDamage: 8), .defend(block: 3)],
-              spriteScale: 0.5,
+              spriteScale: 0.5, spriteContentOffsetY: 0.0156,
               stats: [.dex: 20, .lck: 10])   // quick and reckless: slips hits, crits often
     }
 
@@ -668,6 +744,7 @@ class Enemy: Identifiable {
               spriteContentW: 0.453, spriteContentH: 0.375,
               rotation: [.corrode(damage: 9, frailTurns: 2), .defend(block: 15)],
               spriteScale: 0.78, dropsRelic: .vampireTooth, goldReward: 30,
+              spriteContentOffsetY: 0.0156,
               stats: [.str: 18, .con: 20, .dex: 8])   // elite: sturdier all round
     }
 
@@ -678,6 +755,7 @@ class Enemy: Identifiable {
                       spriteContentW: 0.453, spriteContentH: 0.438,
                       rotation: [.tackle(baseDamage: 8), .attackDefend(damage: 5, block: 10)],
                       spriteScale: 0.65, dropsRelic: .mysteriousAmber, goldReward: 30,
+                      spriteContentOffsetY: -0.0156,
                       stats: [.str: 45, .con: 30, .dex: 4])   // armoured: guards a lot, rarely dodges
         e.status.thorns = 3   // its spikes bite anything that hits it
         return e
@@ -691,6 +769,7 @@ class Enemy: Identifiable {
               spriteContentW: 0.453, spriteContentH: 0.375,
               rotation: [.tackle(baseDamage: 12), .harden(block: 10, strengthGain: 1, clearsDebuffs: false)],
               spriteScale: 0.95, goldReward: 50, guaranteedEquipmentDrops: 2,
+              spriteContentOffsetY: 0.0156,
               stats: [.str: 30, .con: 55, .dex: 0])   // a wall: soaks hits, too big to dodge
     }
 
@@ -701,7 +780,7 @@ class Enemy: Identifiable {
               rotation: [.tackle(baseDamage: 12),
                          .gooSpit(slimeCount: 2, weakTurns: 2),
                          .harden(block: 15, strengthGain: 2, clearsDebuffs: true)],
-              goldReward: 100,
+              goldReward: 100, spriteContentOffsetY: -0.0078,
               stats: [.str: 45, .dex: 22, .con: 45, .lck: 20])   // boss: strong at everything
     }
 }
