@@ -344,6 +344,7 @@ enum EnemyIntent {
     case defend(block: Int)
     case attackDefend(damage: Int, block: Int)   // deals damage AND gains block
     case corrode(damage: Int, frailTurns: Int)   // acid — damages and eats away at Block
+    case venom(damage: Int, poisonStacks: Int)   // damages and leaves poison behind
 
     var displayName: String {
         switch self {
@@ -353,6 +354,7 @@ enum EnemyIntent {
         case .defend: return "Defend"
         case .attackDefend: return "Spike"
         case .corrode: return "Corrode"
+        case .venom: return "Toxic Slam"
         }
     }
 
@@ -423,6 +425,7 @@ enum EnemyIntent {
         case .harden:       return .defendBuff
         case .attackDefend: return .attackDefend
         case .corrode:      return .attackDebuff
+        case .venom:        return .attackDebuff
         }
     }
 
@@ -434,6 +437,7 @@ enum EnemyIntent {
         case .tackle(let base):         return "\(status.damageDealt(base))"
         case .attackDefend(let dmg, _): return "\(status.damageDealt(dmg))"
         case .corrode(let dmg, _):      return "\(status.damageDealt(dmg))"
+        case .venom(let dmg, _):        return "\(status.damageDealt(dmg))"
         default:                        return nil
         }
     }
@@ -525,7 +529,7 @@ struct DerivedStats {
 
 // MARK: - Combat Flash (floating text over a combatant)
 
-enum FlashKind { case damage, crit, dodge, guarded, heal, poison }
+enum FlashKind { case damage, crit, dodge, guarded, heal, poison, thorns }
 
 struct CombatFlash: Equatable {
     let id = UUID()
@@ -552,12 +556,42 @@ enum EquipmentSlot: String, CaseIterable, Identifiable {
 
 /// A piece of gear. Unlike relics (passives/abilities), equipment grants flat stat boosts.
 /// One item per slot; extras live in the inventory.
+/// How scarce a piece of gear is. Drops are weighted by this: the 25% drop *chance* is
+/// unchanged, but what falls out is far more often ordinary than not.
+///
+/// The tiers track how much a piece is actually worth — total stat points, roughly — so scarcity
+/// and power point the same way. Before this, a plain +2 CON cap and a +4 CON/+2 STR chestplate
+/// were equally likely, which made the good pieces feel arbitrary rather than earned.
+enum EquipmentRarity: String, Codable, CaseIterable {
+    case common, rare, legendary
+
+    /// Relative likelihood of a drop being this tier, per item in it. With 11 commons, 9 rares
+    /// and 5 legendaries that lands at roughly 71% / 23% / 6% — about one legendary every three
+    /// runs, which is what makes finding one an event.
+    var weight: Double {
+        switch self {
+        case .common:    return 10
+        case .rare:      return 4
+        case .legendary: return 2
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .common:    return "Common"
+        case .rare:      return "Rare"
+        case .legendary: return "Legendary"
+        }
+    }
+}
+
 struct Equipment: Identifiable {
     let id = UUID()
     let name: String
     let slot: EquipmentSlot
     let statBonuses: [StatKind: Int]
     let sellValue: Int
+    var rarity: EquipmentRarity = .common
     var iconName: String? = nil
 
     /// "+2 CON, +1 STR"
@@ -569,25 +603,73 @@ struct Equipment: Identifiable {
     }
 
     /// A random droppable piece (fresh id each call, so duplicates are distinct).
+    ///
+    /// **Four per slot, deliberately.** Legs and feet used to carry two pieces each against the
+    /// weapon slot's four, so those slots repeated twice as often — an even spread is what keeps
+    /// duplicate drops down without simply printing more gear.
+    ///
+    /// Stat coverage was the other half of the problem: CHA appeared on **nothing at all**, and
+    /// LCK on two pieces, so both stats were near-impossible to build into even when a player
+    /// wanted to. CHA now appears on 3 and LCK on 5, with FTH lifted from 1 to 3.
+    /// Every droppable piece. Tier tracks worth: commons are one small stat, rares carry a
+    /// second, legendaries are three-stat pieces with no ordinary equivalent. **Every slot has
+    /// one of each tier** — a rarity system where the weapon slot could never roll high would
+    /// read as broken rather than lucky.
+    static let dropTable: [Equipment] = [
+        // ---- Common: a single modest stat ----
+        Equipment(name: "Leather Cap",        slot: .helmet, statBonuses: [.con: 2],            sellValue:  8),
+        Equipment(name: "Focus Hood",         slot: .helmet, statBonuses: [.int: 3],            sellValue: 14),
+        Equipment(name: "Merchant's Circlet", slot: .helmet, statBonuses: [.cha: 3],            sellValue: 18),
+        Equipment(name: "Padded Vest",        slot: .chest,  statBonuses: [.con: 3],            sellValue: 10),
+        Equipment(name: "Leather Greaves",    slot: .legs,   statBonuses: [.dex: 2, .con: 1],   sellValue: 10),
+        Equipment(name: "Fortune's Greaves",  slot: .legs,   statBonuses: [.lck: 3],            sellValue: 18),
+        Equipment(name: "Swift Boots",        slot: .feet,   statBonuses: [.dex: 3],            sellValue: 12),
+        Equipment(name: "Iron Boots",         slot: .feet,   statBonuses: [.con: 2, .str: 1],   sellValue: 12),
+        Equipment(name: "Charmed Slippers",   slot: .feet,   statBonuses: [.lck: 3],            sellValue: 16),
+        Equipment(name: "Rusty Sword",        slot: .weapon, statBonuses: [.str: 3],            sellValue: 12),
+        Equipment(name: "Gambler's Blade",    slot: .weapon, statBonuses: [.lck: 3],            sellValue: 20),
+
+        // ---- Rare: a second stat on top ----
+        Equipment(name: "Iron Helm",          slot: .helmet, statBonuses: [.con: 3, .str: 1],   sellValue: 26, rarity: .rare),
+        Equipment(name: "Iron Chestplate",    slot: .chest,  statBonuses: [.con: 4, .str: 2],   sellValue: 34, rarity: .rare),
+        Equipment(name: "Silk Robe",          slot: .chest,  statBonuses: [.int: 4, .fth: 1],   sellValue: 30, rarity: .rare),
+        Equipment(name: "Noble's Cloak",      slot: .chest,  statBonuses: [.cha: 3, .fth: 1],   sellValue: 30, rarity: .rare),
+        Equipment(name: "Iron Leggings",      slot: .legs,   statBonuses: [.con: 3, .str: 1],   sellValue: 26, rarity: .rare),
+        Equipment(name: "Pilgrim's Leggings", slot: .legs,   statBonuses: [.fth: 3, .con: 1],   sellValue: 26, rarity: .rare),
+        Equipment(name: "Traveler's Boots",   slot: .feet,   statBonuses: [.cha: 2, .lck: 2],   sellValue: 28, rarity: .rare),
+        Equipment(name: "Keen Dagger",        slot: .weapon, statBonuses: [.dex: 3, .lck: 1],   sellValue: 28, rarity: .rare),
+        Equipment(name: "Oak Staff",          slot: .weapon, statBonuses: [.int: 4],            sellValue: 28, rarity: .rare),
+
+        // ---- Legendary: three stats, one per slot, worth stopping the run to equip ----
+        Equipment(name: "Crown of the Fallen King", slot: .helmet,
+                  statBonuses: [.con: 3, .cha: 2, .lck: 1], sellValue: 60, rarity: .legendary),
+        Equipment(name: "Aegis of Theseus",          slot: .chest,
+                  statBonuses: [.con: 4, .str: 2, .fth: 1], sellValue: 68, rarity: .legendary),
+        Equipment(name: "Greaves of the Long March", slot: .legs,
+                  statBonuses: [.dex: 3, .con: 2, .fth: 1], sellValue: 60, rarity: .legendary),
+        Equipment(name: "Wanderer's Treads",         slot: .feet,
+                  statBonuses: [.lck: 3, .dex: 2, .cha: 1], sellValue: 60, rarity: .legendary),
+        Equipment(name: "Kingmaker",                 slot: .weapon,
+                  statBonuses: [.str: 4, .lck: 2],          sellValue: 68, rarity: .legendary),
+    ]
+
+    /// A random droppable piece, weighted by rarity (fresh id each call, so duplicates are
+    /// distinct). The drop *chance* is unchanged — this only decides what falls out.
     static func randomDrop() -> Equipment {
-        let templates: [(String, EquipmentSlot, [StatKind: Int], Int)] = [
-            ("Leather Cap",       .helmet, [.con: 2],           8),
-            ("Iron Helm",         .helmet, [.con: 3, .str: 1], 16),
-            ("Focus Hood",        .helmet, [.int: 3],          14),
-            ("Padded Vest",       .chest,  [.con: 3],          10),
-            ("Iron Chestplate",   .chest,  [.con: 4, .str: 2], 22),
-            ("Silk Robe",         .chest,  [.int: 4, .fth: 1], 20),
-            ("Leather Greaves",   .legs,   [.dex: 2, .con: 1], 10),
-            ("Iron Leggings",     .legs,   [.con: 3, .str: 1], 16),
-            ("Swift Boots",       .feet,   [.dex: 3],          12),
-            ("Iron Boots",        .feet,   [.con: 2, .str: 1], 12),
-            ("Rusty Sword",       .weapon, [.str: 3],          12),
-            ("Keen Dagger",       .weapon, [.dex: 3, .lck: 1], 18),
-            ("Oak Staff",         .weapon, [.int: 4],          18),
-            ("Gambler's Blade",   .weapon, [.lck: 3],          20),
-        ]
-        let t = templates.randomElement()!
-        return Equipment(name: t.0, slot: t.1, statBonuses: t.2, sellValue: t.3)
+        let total = dropTable.reduce(0.0) { $0 + $1.rarity.weight }
+        var roll = Double.random(in: 0 ..< total)
+        for item in dropTable {
+            roll -= item.rarity.weight
+            if roll < 0 { return copy(of: item) }
+        }
+        return copy(of: dropTable[0])   // unreachable; keeps the return total
+    }
+
+    /// A fresh instance of a template — `id` is generated per value, so two drops of the same
+    /// piece are separate items in the inventory rather than one that appears twice.
+    private static func copy(of item: Equipment) -> Equipment {
+        Equipment(name: item.name, slot: item.slot, statBonuses: item.statBonuses,
+                  sellValue: item.sellValue, rarity: item.rarity, iconName: item.iconName)
     }
 }
 
@@ -777,7 +859,10 @@ class Enemy: Identifiable {
     static func slimeKing() -> Enemy {
         Enemy(name: "Slime King", maxHp: 160, spriteName: "boss_slime",
               spriteContentW: 0.61, spriteContentH: 0.578,
-              rotation: [.tackle(baseDamage: 12),
+              // His damage turn now leaves poison behind. 3 stacks ≈ 9 HP over the three turns
+              // his rotation takes to come back round, so it is near-permanent pressure that
+              // Block cannot answer — without raising the number he hits for.
+              rotation: [.venom(damage: 12, poisonStacks: 3),
                          .gooSpit(slimeCount: 2, weakTurns: 2),
                          .harden(block: 15, strengthGain: 2, clearsDebuffs: true)],
               goldReward: 100, spriteContentOffsetY: -0.0078,
@@ -1172,17 +1257,21 @@ class GameEngine {
         AudioManager.shared.play(.attack)
 
         // Thorns — hitting a spiked enemy costs you. Bypasses Block, like Poison.
+        // Named in the flash: an unexplained 3 HP tick in the middle of your own attack reads
+        // as nothing happening at all, which is exactly how a working Thorns looks broken.
         if enemy.status.thorns > 0 {
-            takeUnblockableDamage(enemy.status.thorns)
+            takeUnblockableDamage(enemy.status.thorns,
+                                  flash: CombatFlash(text: "\(enemy.status.thorns) THORNS",
+                                                     kind: .thorns))
         }
     }
 
     /// Damage that ignores Block, Dodge and Guard entirely (Thorns, Poison on the player).
-    private func takeUnblockableDamage(_ amount: Int) {
+    private func takeUnblockableDamage(_ amount: Int, flash: CombatFlash? = nil) {
         guard amount > 0 else { return }
         player.currentHp = max(0, player.currentHp - amount)
         damageTakenThisCombat += amount
-        player.combatFlash = CombatFlash(text: "\(amount)", kind: .damage)
+        player.combatFlash = flash ?? CombatFlash(text: "\(amount)", kind: .damage)
         AudioManager.shared.play(.damage)
         checkCombatResolution()
     }
@@ -1207,18 +1296,33 @@ class GameEngine {
         }
     }
 
-    /// Apply a committed card's effect to `targetIndex` (captured when it was played, so a
-    /// queued card still hits the enemy the player aimed at), or to all enemies for AOE.
+    /// Where a card actually lands: the enemy it was aimed at when it was played, or — if that
+    /// enemy has since died to an earlier card in the same queue — wherever the reticle has
+    /// moved on to.
+    ///
+    /// Plays resolve one at a time from a queue, and each carries the target the player picked,
+    /// so aim survives the wait. But an aim at a corpse is not aim worth keeping: queue three
+    /// Strikes into an enemy the second one kills and the third used to land on the body and do
+    /// nothing at all, silently wasting the card and its energy.
+    private func liveTarget(aimedAt index: Int) -> Enemy? {
+        if enemies.indices.contains(index), enemies[index].isAlive { return enemies[index] }
+        retargetIfNeeded()                                  // follow the reticle the player sees
+        if let current = currentTarget, current.isAlive { return current }
+        return enemies.first { $0.isAlive }
+    }
+
+    /// Apply a committed card's effect to the enemy it was aimed at (see `liveTarget`), or to
+    /// all enemies for AOE.
     func resolveCardEffect(_ card: Card, targetIndex: Int) {
         guard gameState == .playing else { return }
-        let target: Enemy? = enemies.indices.contains(targetIndex) ? enemies[targetIndex] : nil
+        let target = liveTarget(aimedAt: targetIndex)        // never a corpse
 
         if card.damage > 0 {
             if card.hitsAllEnemies {
                 for enemy in enemies where enemy.isAlive {
                     dealDamage(card.damage, to: enemy)
                 }
-            } else if let target, target.isAlive {
+            } else if let target {
                 dealDamage(card.damage, to: target)
             }
         }
@@ -1470,6 +1574,12 @@ class GameEngine {
         case .corrode(let damage, let frailTurns):
             dealDamageToPlayer(atk(damage), from: enemy)
             if frailTurns > 0 { player.status.frail += frailTurns }
+
+        case .venom(let damage, let poisonStacks):
+            dealDamageToPlayer(atk(damage), from: enemy)
+            // Poison bypasses Block, so this is damage that Defend can't answer — the point
+            // of giving it to the boss is that turtling through his fight stops working.
+            if poisonStacks > 0 { player.status.poison += poisonStacks }
         }
 
         enemy.status.tickDurations()   // Weak / Frail / Stun count down after acting
@@ -1557,8 +1667,10 @@ class GameEngine {
         }
     }
 
-    /// Rest floors allow drafting except the final one (Floor 16, heal only).
-    var restDraftAllowed: Bool { currentFloor != 16 }
+    /// Every rest site offers the same two choices — Rest or Train. Floor 16 used to be heal
+    /// only; it now gets the draft as well, but as a *choice*, not both at once: a free heal
+    /// plus a free card right before the final stretch was a power spike, not a send-off.
+    var restDraftAllowed: Bool { true }
 
     /// Spawn a combat encounter and reset per-fight state (player HP carries over).
     private func startCombat(with newEnemies: [Enemy]) {
@@ -1597,7 +1709,8 @@ class GameEngine {
     /// Configure whatever the current floor is. Encounters are FIXED per floor and
     /// hand-tuned into a fair difficulty curve for a fresh run:
     ///   • Floors 1–3 use only the starter deck — kept gentle, one teaching idea each.
-    ///   • Rests (4/10/16) + Shop (after 10) space out the power spikes.
+    ///   • Rests (4/10/16) + Shops (after the 10 and 16 rests) space out the power spikes.
+    ///     Floor 16's rest grants heal *and* draft, rather than heal alone.
     ///   • Mini-boss on 9; Elites on 5/13; Boss on 18.
     /// (Slime = tanky/40 HP/6 dmg; Red Slime = fragile/20 HP/10 dmg burst.)
     private func setupCurrentFloor() {
@@ -1641,11 +1754,19 @@ class GameEngine {
         }
     }
 
+    /// Floors whose combat is preceded by a Shop — each sits directly after a rest, so the
+    /// pattern reads the same both times: recover, spend, fight.
+    ///
+    /// The second one exists because gold outruns its uses in the back half: by Floor 16 a run
+    /// is earning 30–50 a fight with nothing left to buy, and elite drops pile up unsold.
+    /// Placing it before 17 rather than before the boss leaves two fights to actually use a
+    /// purchase in — a card bought immediately before the boss might never be drawn.
+    static let shopFloors: Set<Int> = [11, 17]
+
     /// Advance to the next floor and configure it.
     func advanceFloor() {
         currentFloor += 1
-        // A Shop sits after the Floor-10 rest — visit it before Floor 11's combat.
-        if currentFloor == 11 {
+        if Self.shopFloors.contains(currentFloor) {
             enemies = []
             stockShop()
             gameState = .shop
@@ -1656,9 +1777,9 @@ class GameEngine {
         saveRun()   // checkpoint each floor, so quitting mid-run doesn't lose it
     }
 
-    /// Leave the shop and start Floor 11's combat.
+    /// Leave the shop and start this floor's combat.
     func leaveShop() {
-        setupCurrentFloor()   // currentFloor is already 11
+        setupCurrentFloor()   // currentFloor is already the shop's floor
     }
 
     // MARK: - Dev tools
@@ -1669,6 +1790,7 @@ class GameEngine {
         setupCurrentFloor()
     }
 
+    #if DEBUG
     /// Dev-only: jump straight to any floor and configure its encounter/rest/boss,
     /// bypassing normal progression (no rewards granted). Used by the DEV floor picker.
     func devJumpToFloor(_ floor: Int) {
@@ -1676,13 +1798,14 @@ class GameEngine {
         setupCurrentFloor()
     }
 
-    /// Dev-only: jump straight into the Shop (normally reached after the Floor-10 rest).
+    /// Dev-only: jump straight into the first Shop (normally reached after the Floor-10 rest).
     func devJumpToShop() {
         currentFloor = 11
         enemies = []
         stockShop()
         gameState = .shop
     }
+    #endif
 
     // MARK: - Shop
 
@@ -1803,6 +1926,7 @@ class GameEngine {
         advanceFloor()
     }
 
+    #if DEBUG
     /// DEV ONLY — drop the player to 0 HP so the death flow (revive offer, then defeat)
     /// can be tested without losing a fight for real.
     func devKillPlayer() {
@@ -1820,4 +1944,5 @@ class GameEngine {
         awardCombatRewards()     // gold + relics for the skipped floor
         gameState = .victory
     }
+    #endif
 }

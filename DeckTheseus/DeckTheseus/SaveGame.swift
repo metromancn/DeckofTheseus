@@ -16,6 +16,9 @@ struct SavedEquipment: Codable {
     var bonuses: [String: Int]
     var sellValue: Int
     var iconName: String?
+    /// Optional so saves written before rarity existed still decode — they load as Common,
+    /// which is what every piece effectively was.
+    var rarity: String?
 
     init(_ item: Equipment) {
         name = item.name
@@ -23,6 +26,7 @@ struct SavedEquipment: Codable {
         bonuses = Dictionary(uniqueKeysWithValues: item.statBonuses.map { ($0.key.rawValue, $0.value) })
         sellValue = item.sellValue
         iconName = item.iconName
+        rarity = item.rarity.rawValue
     }
 
     /// Nil if the slot no longer exists (e.g. the game dropped that slot in an update).
@@ -33,7 +37,9 @@ struct SavedEquipment: Codable {
             if let stat = StatKind(rawValue: key) { stats[stat] = value }
         }
         return Equipment(name: name, slot: slot, statBonuses: stats,
-                         sellValue: sellValue, iconName: iconName)
+                         sellValue: sellValue,
+                         rarity: rarity.flatMap(EquipmentRarity.init(rawValue:)) ?? .common,
+                         iconName: iconName)
     }
 }
 

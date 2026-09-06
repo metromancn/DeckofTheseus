@@ -86,6 +86,46 @@ struct CroppedSprite: View {
     }
 }
 
+// MARK: - Developer tools switch
+//
+// Two locks, on purpose:
+//   • `#if DEBUG` around the tooling means it cannot exist in a Release build at all.
+//   • `DevTools.enabled` hides it in Debug builds too — which is what you run from Xcode, so
+//     without this the panel is on screen during ordinary play-testing.
+//
+// FLIP THIS ONE LINE to `true` when you need the floor picker back, and to `false` before
+// recording or demoing. The code stays either way.
+
+enum DevTools {
+    #if DEBUG
+    static let enabled = false
+    #else
+    static let enabled = false   // never, in a shipped build
+    #endif
+}
+
+// MARK: - Equipment rarity colours
+//
+// The genre's own shorthand — grey/parchment for ordinary, blue for rare, orange for legendary.
+// Worth borrowing rather than inventing: a player who has met any other loot game already reads
+// it without being told, and the border does the work before the stat line is even scanned.
+
+extension EquipmentRarity {
+    var tint: Color {
+        switch self {
+        case .common:    return Color(hex: 0xB9AC8E)   // parchment — the existing neutral
+        case .rare:      return Color(hex: 0x5AA6E8)
+        case .legendary: return Color(hex: 0xF0932B)
+        }
+    }
+
+    /// Legendaries earn a glow; anything more would make every drop shout.
+    var glow: Color { self == .legendary ? tint.opacity(0.55) : .clear }
+
+    /// Commons don't announce themselves — showing "Common" on two thirds of all drops is noise.
+    var badge: String? { self == .common ? nil : label.uppercased() }
+}
+
 // MARK: - Arena Geometry
 //
 // `fight_background` is drawn with `contentMode: .fill`, so how the art lands on screen depends
@@ -190,6 +230,7 @@ struct CombatFlashView: View {
         case .guarded: return Color(hex: 0x9BE38B)
         case .heal:    return Color(hex: 0x76E06A)
         case .poison:  return Color(hex: 0xB84AE0)
+        case .thorns:  return Color(hex: 0xD9954A)   // the THORN badge's brown, lifted to read on dark
         }
     }
 
@@ -291,8 +332,13 @@ struct EnemyView: View {
                     .animation(.easeInOut(duration: 1.75).repeatForever(autoreverses: true), value: pulsing)
                     .overlay { SpriteVFXView(vfx: enemy.vfx, size: spriteH * 0.9) }
                     .opacity(enemy.isAlive ? 1.0 : 0.25)
-
-                // Floating combat text (damage / CRIT).
+            }
+            // Floating combat text (damage / CRIT) — an OVERLAY, not a sibling in the stack.
+            // A `CombatFlash` is never cleared once set; only its opacity animates away. As a
+            // sibling its invisible Text kept its width forever, so an enemy that had dodged
+            // ("DODGE" ≈ 85pt, "CRIT!" ≈ 110pt) stayed permanently wider than its own ~79pt
+            // sprite — which spread the line unevenly and shoved the far enemy off the ledge.
+            .overlay(alignment: .top) {
                 CombatFlashView(flash: enemy.combatFlash, fontSize: heartSize * 0.42)
                     .offset(y: -spriteH * 0.35)
             }
@@ -758,8 +804,11 @@ struct ContentView: View {
     @State private var revealedCardIds: Set<UUID> = []
     @State private var isEnemyTurn = false
 
-    // DEV floor picker: jump to any floor for testing.
+    #if DEBUG
+    // DEV floor picker: jump to any floor for testing. Debug-only — a Release build (which is
+    // what ships) contains none of the developer tooling at all.
     @State private var showDevPanel = false
+    #endif
 
     // Which stat's explanation bubble is showing in the character screen.
     @State private var statTooltip: StatKind? = nil
@@ -788,6 +837,7 @@ struct ContentView: View {
     @State private var isRestoringRun = false
     // Gem shop, shown from the revive prompt when the player can't afford it.
     @State private var showGemShop = false
+    @State private var showCredits = false
     /// Mirror of `GemWallet.balance` (UserDefaults isn't observable) so the UI refreshes.
     @State private var gemBalance = 0
 
@@ -903,7 +953,7 @@ struct ContentView: View {
                     .frame(width: geo.size.width, height: geo.size.height)
                     .allowsHitTesting(false)
 
-                // Top bar: Floor-Act + Turn + Gold (left), dev SKIP (right)
+                // Top bar: Floor-Act + Turn + Gold + relics (left), then the player's HUD bar
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 12) {
                         Text("\(engine.currentAct)-\(engine.currentFloor)")
@@ -1260,13 +1310,26 @@ struct ContentView: View {
                                 .foregroundColor(Color(hex: 0x8FD0FF))
                                 .shadow(color: Color(hex: 0x8FD0FF).opacity(0.7), radius: 14)
 
+                            // The name itself carries the tier, so a legendary announces
+                            // itself before the stat line is read.
                             Text(item.name)
                                 .font(.pixel(min(unit * 0.055, 38)))
-                                .foregroundColor(.textParchment)
+                                .foregroundColor(item.rarity == .common ? .textParchment : item.rarity.tint)
+                                .shadow(color: item.rarity.glow, radius: 16)
+                                .multilineTextAlignment(.center)
 
-                            Text(item.slot.label)
-                                .font(.pixel(min(unit * 0.03, 20)))
-                                .foregroundColor(.textMuted)
+                            HStack(spacing: 8) {
+                                if let badge = item.rarity.badge {
+                                    Text(badge)
+                                        .font(.pixel(min(unit * 0.026, 17)))
+                                        .foregroundColor(item.rarity.tint)
+                                        .padding(.horizontal, 8).padding(.vertical, 2)
+                                        .overlay(Capsule().stroke(item.rarity.tint, lineWidth: 1.2))
+                                }
+                                Text(item.slot.label)
+                                    .font(.pixel(min(unit * 0.03, 20)))
+                                    .foregroundColor(.textMuted)
+                            }
 
                             Text(item.bonusSummary)
                                 .font(.pixel(min(unit * 0.038, 26)))
@@ -1417,7 +1480,7 @@ struct ContentView: View {
                 // Gems can be bought without having to die first) and the Settings gear
                 // (in-run only). Hidden behind a dialogue scene, the gem shop and settings,
                 // which own the screen while they're up.
-                if activeScene == nil && !showGemShop && !showSettings && !showCharacter {
+                if activeScene == nil && !showGemShop && !showSettings && !showCharacter && !showCredits {
                     HStack(spacing: 12) {
                         GemBarView(balance: gemBalance, size: titleFont) {
                             showGemShop = true
@@ -1449,10 +1512,12 @@ struct ContentView: View {
                         .zIndex(2600)
                 }
 
-                if showDevPanel {
+                #if DEBUG
+                if DevTools.enabled, showDevPanel {
                     devPanel(unit: unit)
                         .zIndex(1600)
                 }
+                #endif
 
                 // Narrative dialogue — above everything, including the dev buttons.
                 // Pinned to the exact geometry rect so it centers on the window even if a
@@ -1493,6 +1558,15 @@ struct ContentView: View {
                         .frame(width: geo.size.width, height: geo.size.height)
                         .position(x: geo.size.width / 2, y: geo.size.height / 2)
                         .zIndex(3000)
+                }
+
+                // Credits — opened from the title menu or mid-run from Settings, so it has to
+                // sit above both.
+                if showCredits {
+                    CreditsView(unit: unit, size: geo.size) { showCredits = false }
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                        .zIndex(3400)
                 }
             }
         }
@@ -1553,6 +1627,13 @@ struct ContentView: View {
     }
 
     // MARK: - DEV floor picker
+    //
+    // Everything from here to the end of `devJumpButton` is DEBUG-only and is not compiled into
+    // a Release build. Kept rather than deleted: these are how the game gets tested, and a
+    // conditional keeps them out of players' hands more reliably than remembering to strip them
+    // before every submission.
+
+    #if DEBUG
 
     /// Short label for each floor so the picker is easy to scan.
     private static let devFloors: [(Int, String)] = [
@@ -1630,6 +1711,8 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
+    #endif   // DEBUG — end of the developer tooling
+
     // MARK: - Dialogue
 
     /// Play a scene and suspend until it finishes, so callers can sequence it inside an
@@ -1666,7 +1749,8 @@ struct ContentView: View {
     // anything that could change it moves; `playMusic` ignores a repeat request, so the
     // track never restarts mid-fight.
     private func syncMusic() {
-        // The title page or the opening owns the screen — the run's music hasn't started.
+        // The title page and the opening scene own the screen and set their own tracks
+        // (`.intro` and `.opening`); the run's music hasn't started yet.
         guard !openingActive, !showTitle else { return }
         let track: AudioManager.Music?
         if showCharacter {
@@ -1828,9 +1912,13 @@ struct ContentView: View {
                     }.buttonStyle(.plain)
                 }
 
+                #if DEBUG
+                if DevTools.enabled {
                 Rectangle().fill(Color.goldBorder.opacity(0.5)).frame(height: 1)
 
-                // Developer tools — testing shortcuts, not player settings.
+                // Developer tools — testing shortcuts, not player settings. The whole block,
+                // separator included, is absent from a Release build and hidden unless
+                // `DevTools.enabled` is flipped on.
                 VStack(alignment: .leading, spacing: 8) {
                     Text("DEVELOPER").font(.pixel(f * 0.95)).foregroundColor(.textMuted)
                     HStack(spacing: unit * 0.014) {
@@ -1866,10 +1954,16 @@ struct ContentView: View {
                         }
                     }
                 }
+                }
+                #endif   // DEBUG — end of the developer tools
 
                 Rectangle().fill(Color.goldBorder.opacity(0.5)).frame(height: 1)
 
                 VStack(spacing: unit * 0.014) {
+                    // Also reachable mid-run, so attribution isn't behind quitting the game.
+                    settingsButton("Credits", font: f, tint: Color(hex: 0x2E2340)) {
+                        showCredits = true
+                    }
                     settingsButton("Save & Quit to Title", font: f, tint: Color(hex: 0x2C6E3C)) {
                         showSettings = false
                         exitToTitle()
@@ -1968,21 +2062,42 @@ struct ContentView: View {
         AudioManager.shared.playMusic(.intro)
     }
 
-    /// PLACEHOLDER title page — the background is `art_title_background`, which renders as a
-    /// labelled black screen until that asset exists. Nothing of the run runs behind it.
+    /// Title page. Drop `art_title_background` into the asset catalog and it takes over
+    /// automatically; until then the page stands on a plain dark ground of its own rather than
+    /// a labelled placeholder. Nothing of the run runs behind it.
     @ViewBuilder
     private func titleScreen(unit: CGFloat, size: CGSize) -> some View {
         let titleFont = min(unit * 0.105, 78)
         let menuFont = min(unit * 0.040, 28)
+        let hasArt = DialogueScript.assetExists("art_title_background")
 
         ZStack {
-            DialogueBackdropView(assetName: "art_title_background")
-                .frame(width: size.width, height: size.height)
-                .clipped()
+            Group {
+                if hasArt {
+                    Image("art_title_background")
+                        .resizable()
+                        .interpolation(.none)
+                        .aspectRatio(contentMode: .fill)
+                } else {
+                    // Deliberately plain: a slow wash from the game's deep background into
+                    // black, with a faint gold bloom behind the title so it isn't dead flat.
+                    LinearGradient(colors: [Color(hex: 0x171233), .bgDeep],
+                                   startPoint: .top, endPoint: .bottom)
 
-            // Darken toward the bottom so the menu stays readable over any artwork.
-            LinearGradient(colors: [.black.opacity(0.45), .black.opacity(0.82)],
-                           startPoint: .top, endPoint: .bottom)
+                    RadialGradient(colors: [Color.goldBright.opacity(0.09), .clear],
+                                   center: UnitPoint(x: 0.5, y: 0.28),
+                                   startRadius: 0, endRadius: unit * 0.8)
+                }
+            }
+            .frame(width: size.width, height: size.height)
+            .clipped()
+
+            // Only needed to hold the menu legible over artwork — the plain ground is already
+            // dark enough, and this would crush its gradient.
+            if hasArt {
+                LinearGradient(colors: [.black.opacity(0.45), .black.opacity(0.82)],
+                               startPoint: .top, endPoint: .bottom)
+            }
 
             VStack(spacing: 0) {
                 Spacer(minLength: size.height * 0.10)
@@ -2008,6 +2123,9 @@ struct ContentView: View {
                     titleMenuItem(hasSave ? "New Run" : "Start Run", font: menuFont) {
                         beginNewRun()
                     }
+                    titleMenuItem("Credits", font: menuFont) {
+                        showCredits = true
+                    }
                     #if os(macOS)
                     titleMenuItem("Quit Game", font: menuFont) {
                         NSApplication.shared.terminate(nil)
@@ -2016,12 +2134,6 @@ struct ContentView: View {
                 }
                 .padding(.bottom, size.height * 0.11)
             }
-
-            Text("Act 1 \u{2022} Slime Biome \u{2014} placeholder title art")
-                .font(.pixel(min(unit * 0.024, 15)))
-                .foregroundColor(.textMuted)
-                .padding(20)
-                .frame(width: size.width, height: size.height, alignment: .bottomLeading)
         }
         .frame(width: size.width, height: size.height)
     }
@@ -2048,6 +2160,10 @@ struct ContentView: View {
     /// music starts until it's finished, so nothing of the fight leaks through it.
     @MainActor
     private func startRun() async {
+        // Its own theme, set here rather than in `syncMusic` — that reads the *run's* state,
+        // and the run hasn't begun. Ending the scene hands over to `syncMusic`, which
+        // crossfades into the first fight.
+        AudioManager.shared.playMusic(.opening)
         await playScene(for: .runStart)
         openingActive = false
         dealNewHand()
@@ -2554,7 +2670,9 @@ struct ContentView: View {
                     if let item = engine.player.equippedItems[slot] {
                         Button { engine.unequip(slot) } label: {
                             HStack(spacing: 4) {
-                                Text(item.name).font(.pixel(bodyFont * 0.95)).foregroundColor(.textParchment)
+                                Text(item.name)
+                                    .font(.pixel(bodyFont * 0.95))
+                                    .foregroundColor(item.rarity == .common ? .textParchment : item.rarity.tint)
                                     .lineLimit(1)
                                 Spacer(minLength: 2)
                                 Image(systemName: "xmark.circle.fill")
@@ -2563,7 +2681,10 @@ struct ContentView: View {
                             .padding(.horizontal, 6).padding(.vertical, 2)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(RoundedRectangle(cornerRadius: 4).fill(Color.goldAccent.opacity(0.20)))
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.goldBorder.opacity(0.6), lineWidth: 1))
+                            .overlay(RoundedRectangle(cornerRadius: 4)
+                                .stroke(item.rarity == .common ? Color.goldBorder.opacity(0.6) : item.rarity.tint,
+                                        lineWidth: item.rarity == .common ? 1 : 1.6))
+                            .shadow(color: item.rarity.glow, radius: 5)
                         }.buttonStyle(.plain)
                     } else {
                         Text("Empty").font(.pixel(bodyFont * 0.95)).foregroundColor(Color(hex: 0x5A5268))
@@ -2586,7 +2707,9 @@ struct ContentView: View {
                             Button { engine.equip(item) } label: {
                                 VStack(alignment: .leading, spacing: 1) {
                                     HStack {
-                                        Text(item.name).font(.pixel(bodyFont)).foregroundColor(.textParchment)
+                                        Text(item.name)
+                                            .font(.pixel(bodyFont))
+                                            .foregroundColor(item.rarity == .common ? .textParchment : item.rarity.tint)
                                         Spacer()
                                         Text(item.slot.label).font(.pixel(bodyFont * 0.85)).foregroundColor(.textMuted)
                                     }
@@ -2595,7 +2718,10 @@ struct ContentView: View {
                                 .padding(.horizontal, 6).padding(.vertical, 4)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.3)))
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.goldBorder.opacity(0.4), lineWidth: 1))
+                                .overlay(RoundedRectangle(cornerRadius: 4)
+                                    .stroke(item.rarity == .common ? Color.goldBorder.opacity(0.4) : item.rarity.tint,
+                                            lineWidth: item.rarity == .common ? 1 : 1.6))
+                                .shadow(color: item.rarity.glow, radius: 5)
                             }.buttonStyle(.plain)
                         }
                     }
@@ -2844,7 +2970,11 @@ struct ContentView: View {
                             ForEach(engine.player.equipmentInventory) { item in
                                 HStack {
                                     VStack(alignment: .leading, spacing: 1) {
-                                        Text(item.name).font(.pixel(bodyFont)).foregroundColor(.textParchment)
+                                        // Tinted here too — this is the screen where you decide
+                                        // what to part with, so the tier has to be obvious.
+                                        Text(item.name)
+                                            .font(.pixel(bodyFont))
+                                            .foregroundColor(item.rarity == .common ? .textParchment : item.rarity.tint)
                                         Text(item.bonusSummary).font(.pixel(bodyFont * 0.85)).foregroundColor(.goldBright)
                                     }
                                     Spacer()

@@ -25,10 +25,22 @@ final class AudioManager {
 
     /// Background tracks. Only one plays at a time.
     enum Music: String {
-        case intro = "sfx_introloop"   // title page
-        case fight = "sfx_fightloop"
-        case boss  = "sfx_bossloop"
-        case rest  = "sfx_restloop"
+        case intro   = "sfx_introloop"     // title page
+        case opening = "sfx_openingloop"   // the opening story scene
+        case fight   = "sfx_fightloop"
+        case boss    = "sfx_bossloop"
+        case rest    = "sfx_restloop"
+
+        /// Level for this track relative to the player's music slider, so one track can sit
+        /// lower than another without the slider lying about what it controls. The opening
+        /// plays *under* narration — it has to stay beneath the dialogue rather than compete
+        /// with it, unlike a combat loop that has the screen to itself.
+        var gain: Float {
+            switch self {
+            case .opening: return 0.60
+            default:       return 1.0
+            }
+        }
     }
 
     var sfxVolume: Float = 0.85
@@ -39,7 +51,9 @@ final class AudioManager {
     var musicVolume: Float {
         didSet {
             UserDefaults.standard.set(musicVolume, forKey: Self.musicVolumeKey)
-            musicPlayer?.volume = musicVolume
+            // Through the current track's own gain, so dragging the slider doesn't undo a
+            // deliberately quieter track.
+            musicPlayer?.volume = musicVolume * (currentMusic?.gain ?? 1)
         }
     }
 
@@ -154,7 +168,7 @@ final class AudioManager {
         player.volume = 0
         player.prepareToPlay()
         player.play()
-        player.setVolume(musicVolume, fadeDuration: fade)
+        player.setVolume(musicVolume * music.gain, fadeDuration: fade)
         musicPlayer = player
     }
 

@@ -100,14 +100,25 @@
   floating ▼ used to do this, but once the intent badge moved above the head the two collided —
   a phone has only ~30pt of air over an enemy to share.)
 * **Floating combat text:** damage numbers, gold **CRIT!**, blue **DODGE**, green **GUARD**,
-  purple **poison**, green **heal** — so stat rolls are visible.
+  purple **poison**, green **heal**, brown **THORNS** — so stat rolls are visible.
+  * It must be attached as an **`.overlay`, never as a sibling in the sprite's stack.** A
+    `CombatFlash` is never cleared once set — only its opacity animates away — so as a sibling
+    its invisible `Text` keeps its width forever. An enemy that had dodged ("DODGE" ≈ 85pt) or
+    critted ("CRIT!" ≈ 110pt) stayed permanently wider than its own ~79pt sprite, which spread
+    the enemy line unevenly, shoved the far enemy off the ledge, and changed the arena depending
+    on *which* enemy you had hit and in what order.
 * **Playing cards — drag-to-play, queued:**
   * **Tap** a card to select it (multi-select; selected cards reserve their energy in the
     HUD counter). **Drag** a card up into the middle and release to play it.
   * A played card **leaves the hand instantly** (energy spent) and is **queued**; the queue
     resolves plays one at a time — each parks in the center, holds, fades, then its effect +
     animation fire. So you can fire several cards without waiting on animations.
-  * Each card hits the enemy you aimed at **when you played it**; hold a card for its tooltip.
+  * Each card hits the enemy you aimed at **when you played it** — unless that enemy has since
+    died to an earlier card in the same queue, in which case it follows the reticle to a living
+    one (`liveTarget(aimedAt:)`). Aim worth preserving is aim at something alive: queuing three
+    Strikes into an enemy the second one kills used to waste the third on the corpse, silently,
+    along with its energy. A card that kills its *own* target still doesn't debuff the body.
+    Hold a card for its tooltip.
   * **`HandCardView` owns its own drag offset**, and this matters for frame rate. The offset was
     once `@State` on `ContentView`, rewritten on every gesture callback — so each frame of every
     drag invalidated the whole ~990-line combat body (background, HUD, sprites, bars, the rest of
@@ -137,8 +148,59 @@
 ## 3b. Title Page
 The game opens on a **title page**, not a fight — it owns the whole screen, and nothing of a
 run (cards, music) runs behind it. Menu: **Start Run / New Run**, **Continue Run** (only when a
-resumable run is saved), and **Quit Game** (macOS, quits the app). Background art is `art_title_background`, a
-labelled black placeholder until that asset is added.
+resumable run is saved), and **Quit Game** (macOS, quits the app). The background is
+`art_title_background` **if that asset exists**; otherwise the page stands on a plain dark ground
+of its own — a vertical wash from `#171233` into `bgDeep` with a faint gold bloom behind the
+title. Adding the asset switches it over automatically and re-enables the darkening scrim that
+keeps the menu legible over artwork (the plain ground doesn't need it, and it would crush the
+gradient). Nothing here is labelled as a placeholder — this is shippable as it stands.
+
+### Developer tools — hidden, and DEBUG only
+Two independent locks, because they answer different questions:
+* **`#if DEBUG`** around the floor picker, "Win Fight", "Die Now", "Remove Gems" and the engine's
+  `devJumpToFloor` / `devJumpToShop` / `devKillPlayer` / `devWinCombat` — so none of it can exist
+  in a Release build. Verified by symbol table: in a Release binary `restHealAndAdvance` and
+  `liveTarget` resolve while every `dev*` function is absent.
+* **`DevTools.enabled`** (top of `ContentView.swift`, default `false`) hides them in **Debug**
+  builds too — which is what Xcode runs, so the compile-time guard alone still left the panel on
+  screen during ordinary play-testing. Flip that one line to `true` to get the floor picker back.
+
+Kept rather than deleted: these are how the game gets tested, and a switch is more reliable than
+remembering to strip code before each build.
+
+The dialogue **SKIP** button is *not* a dev tool — it's for players replaying the run — and stays.
+`DialogueBackdropView` no longer draws a missing asset's name on screen; it fails to plain black,
+so a failed load can't put developer text in front of a player.
+
+### Credits
+`Credits.swift` holds the attribution list and the screen that shows it, reachable from the
+**title menu** and from **Settings** mid-run (so attribution isn't behind quitting). Entries carry
+Title / Author / Source / License **plus a link to the licence itself and a note of any change
+made** — Creative Commons asks for all of it, and Freesound's ready-made string omits the licence
+link. `sfx_bossloop` is marked "converted to .m4a" for that reason. **Only assets that actually
+ship are listed.**
+
+**Two tracks are CC BY-NC 4.0 — NonCommercial — and that is a considered decision, not an
+oversight:** `sfx_introloop` (title page) and `sfx_restloop` (rest sites, the same Freesound
+upload once mis-filed as "sfx_shoploop"). NC turns on the *use*, not the user: "not primarily
+intended for or directed toward commercial advantage or monetary compensation." Gems run against
+RevenueCat's **Test Store**, so no money moves and nothing is sold; as a portfolio / hackathon
+build this reads as non-commercial. Two changes would break that, and both are one step away:
+* **Swapping `GemStore.apiKey` from the `test_` key to a production one.** Purchases become real
+  and the argument is gone. Re-check the music at the same time — now *both* loops, not one.
+* **Prize money.** A submission competing for a cash prize sits nearer "monetary compensation"
+  than a portfolio piece does. Grey rather than settled, but it's the weakest point.
+
+Replacing either is cheap — one file in `Sounds/`, one entry in `Credits.audio`.
+
+`sfx_block`, `sfx_heal`, `sfx_win` and `sfx_start` are **CC0** and need no credit; they're listed
+anyway as a courtesy. `sfx_lose` is **CC BY 3.0**, a different licence from the 4.0 used
+elsewhere — keep its deed URL distinct. `sfx_bossloop` and `sfx_fightloop` were converted to
+`.m4a`, which CC BY counts as a change, so both say so.
+
+**All 12 files in `Sounds/` are traced** — 5 × CC BY 4.0, 1 × CC BY 3.0, 2 × CC BY-NC 4.0,
+4 × CC0. Anything added later needs its licence recorded at download time; a sound whose licence
+can't be named can't be complied with, whatever it turns out to be.
 
 ### Saving
 * **Exit** (victory/defeat screens) and **Save & Quit** (settings) return here and **save the
@@ -224,10 +286,21 @@ Encounters are **fixed per floor** (`setupCurrentFloor()`), hand-tuned into a fa
 | 13 | **Elite 2** | Spiked Slime + 2 Slimes → **Mysterious Amber** |
 | 14 | Combat | 3 Slimes |
 | 15 | Combat | 2 Slimes + 1 Red |
-| 16 | **Rest** | heal only (no draft) |
+| 16 | **Rest** | heal / draft — the same two choices as every rest (Shop immediately after) |
 | 17 | Combat | 3 Red Slimes (final gauntlet) |
 | 18 | **Boss** | Slime King |
 | 19 | Story ends | "YOUR KINGDOM IS AVENGED" |
+
+**Two shops**, listed in `GameEngine.shopFloors` — one before Floor 11, one before Floor 17, each
+directly after a rest so the beat reads the same both times: recover, spend, fight. The second
+exists because gold outran its uses in the back half: by Floor 16 a run earns 30–50 a fight with
+nothing to buy and unsold elite drops piling up. It sits before 17 rather than before the boss so
+a purchase has two fights to matter in — a card bought immediately before the boss might never be
+drawn.
+
+Floor 16 used to be heal-only; it now offers the draft as well, but as the same **choice** every
+other rest site presents. Granting both at once was tried and pulled — a free heal *and* a free
+card immediately before the final stretch is a power spike, not a send-off.
 
 Progression is **linear**; a branching **Map** and **Acts 2–3** are _(planned)_. More enemy
 variety / a second biome is the intended cure for repetition _(planned)_.
@@ -258,7 +331,12 @@ statuses lose a stack at the start of their owner's own turn; buffs last the com
 | **Frail** | gains −25% Block from every source; −1/turn | **Acid Slime** (Corrode) | Corrode card |
 | **Stun** | skips its turn (Poison still bites); −1/turn | — *(held back deliberately: losing a whole turn is too punishing)* | Shield Combo |
 | **Strength** | +flat damage dealt (lasts the combat) | — | Harden |
-| **Thorns** | whatever attacks it takes that much, **bypassing Block** (lasts the combat); a fully dodged hit never made contact, so it doesn't trigger | Spikes card | **Spiked Slime** (innate 3) |
+| **Thorns** | whatever attacks it takes that much, **bypassing Block** (lasts the combat); a fully dodged hit never made contact, so it doesn't trigger. The retaliation flashes as **"N THORNS"** in brown — an unexplained 3 HP tick during your own attack reads as nothing happening, which is how a working Thorns looks broken | Spikes card | **Spiked Slime** (innate 3) |
+
+The boss's **Toxic Slam** (`.venom`) is his damage turn and leaves **3 Poison** behind. 3 stacks
+is roughly the three turns his rotation takes to come back round, so the pressure is close to
+permanent — and because Poison bypasses Block, turtling through his fight stops working. It
+raises the fight's floor without raising the number he hits for.
 
 **Harden** (boss) clears Vulnerable / Poison / Weak / Frail from itself; Strength and Thorns
 survive, being buffs. Statuses never carry between fights. Badges and hover/hold explanations
@@ -297,6 +375,24 @@ Legs, Feet, Weapon** — one item per slot; extras sit in the **inventory**.
 * **Equip/manage** on the character screen (EQUIPMENT panel + scrollable inventory); equipping
   updates derived stats and Max HP live. **Sell** spares at the shop.
 * No crafting/materials (cut). Art is **placeholder-free** — gear shows as text (name + bonuses).
+* **25 pieces, exactly 5 per slot — 3 Common, 1 Rare, 1 Legendary each.** The even spread is
+  deliberate: Legs and Feet used to hold two pieces each against Weapon's four, so those slots
+  repeated twice as often. Every slot carrying every tier matters too — a rarity system where the
+  weapon slot could never roll high reads as broken rather than unlucky.
+* **Rarity (`EquipmentRarity`).** The 25% drop *chance* is unchanged; rarity only weights *what*
+  falls out — per item, Common 10 / Rare 4 / Legendary 2, which lands at about **71% / 23% / 6%**.
+  Tiers track worth: a Common is one modest stat, a Rare adds a second, a Legendary is a
+  three-stat piece with no ordinary equivalent, and in every slot the Legendary out-stats and
+  out-sells everything below it. Previously a +2 CON cap and a +4 CON/+2 STR chestplate were
+  equally likely, which made good gear feel arbitrary rather than earned.
+* **Reading it:** the genre's own shorthand — parchment / **blue** / **orange** — on the item
+  name, its border and the drop banner, with a glow and a tier badge on Legendaries only.
+  Commons stay unmarked; labelling two thirds of all drops "Common" is noise.
+* Rarity is persisted, and saves written before it existed decode as Common.
+* **Stat coverage is the other half of that.** CHA appeared on *nothing*, and LCK on two pieces,
+  so neither could be built into even by a player who wanted to — which is what made the Merchant
+  and Lucky Drop identities feel inert. Both now appear across all three tiers. CHA and LCK gear
+  carries a small sell-value premium, since neither raises survivability.
 
 ## 9. Cards
 **Starter (10):** 5× Strike (1⚡, 6 dmg), 4× Defend (1⚡, 5 block), 1× Bash (2⚡, 8 dmg + 1 Vulnerable).
@@ -404,7 +500,18 @@ already playing. `syncMusic()` derives it from state:
 | `sfx_bossloop` | elite, mini-boss or boss combat (from `isEliteOrBossEncounter`, derived from the enemies, not hard-coded floors) |
 | `sfx_restloop` | rest site, card draft, shop, stats/character screen, victory, act complete |
 | `sfx_introloop` | the title page |
+| `sfx_openingloop` | the opening story scene |
 | *(silence)* | defeat — under the lose stinger |
+
+The title page and the opening set their tracks **directly** (in `syncMusic`'s guard and in
+`startRun()` respectively) rather than through `syncMusic()`, which reads the *run's* state — and
+during those two the run hasn't begun. Ending the opening hands back to `syncMusic()`, which
+crossfades into the first fight.
+
+**Per-track level.** `Music.gain` scales a track against the player's music slider, so one track
+can sit lower without the slider lying about what it controls — it multiplies through both
+`playMusic` and the slider's `didSet`. `sfx_openingloop` runs at **0.60**: it plays *under*
+narration and has to stay beneath the dialogue, unlike a combat loop that owns the screen.
 
 **One-shot SFX**
 
@@ -453,7 +560,7 @@ so they crit, dodge and guard by identical formulas (everyone has a 5% dodge / 5
 | Acid Slime | Elite (F5) | 55 | 30 | **Corrode (9 dmg + 2 Frail)** → Defend 15 · drops Vampire Tooth |
 | Spiked Slime | Elite (F13) | 72 | 30 | Tackle 8 → Spike (5 dmg + 10 block) · **innate Thorns 3** · drops Mysterious Amber |
 | Giant Slime | Mini-boss (F9) | 100 | 50 | Tackle 12 → Harden (10 block + 1 Str) · **2 guaranteed gear** · placeholder art |
-| Slime King | Boss (F18) | 160 | 100 | Tackle 12 → **Goo Spit ×2 (+2 Weak, −1 energy)** → Harden (15 block + 2 Str, clears debuffs) |
+| Slime King | Boss (F18) | 160 | 100 | **Toxic Slam (12 dmg + 3 Poison)** → **Goo Spit ×2 (+2 Weak, −1 energy)** → Harden (15 block + 2 Str, clears debuffs) |
 
 ## 14. Presentation
 Turn banners; frame-by-frame VFX (`basic_attack_animation`, `heal_debuff_animation2`,

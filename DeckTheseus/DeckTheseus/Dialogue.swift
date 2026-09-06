@@ -190,15 +190,11 @@ struct DialogueBackdropView: View {
                     .resizable()
                     .interpolation(.none)
                     .aspectRatio(contentMode: .fill)
-            } else {
-                // PLACEHOLDER — drop `\(assetName)` into the asset catalog to replace this.
-                VStack(spacing: 6) {
-                    Text("[ story background ]")
-                    Text(assetName)
-                }
-                .font(.pixel(15))
-                .foregroundColor(Color.white.opacity(0.16))
             }
+            // No `else` branch on purpose. Every backdrop the script references ships with the
+            // game, so this can't normally be reached — but it used to draw the asset's name on
+            // screen, which would put developer text in front of a player if a load ever failed
+            // on a device. A plain black ground fails quietly instead.
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
