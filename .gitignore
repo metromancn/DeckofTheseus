@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# Xcode — per-user state, not project configuration. These change every time the
+# editor is opened, so tracking them makes noise in every diff.
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+# Build products
+build/
+DerivedData/
+*.hmap
+*.ipa
+*.dSYM
+*.dSYM.zip
+*.moved-aside
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Claude Code local session config
+.claude/
